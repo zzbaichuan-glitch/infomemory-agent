@@ -16,11 +16,22 @@ export {
 export {
   type AssetIngestResult,
   type AssetListOptions,
+  type AssetListPage,
   type AssetRepository,
+  type AssetSearchHit,
+  type AssetSearchOptions,
   type DeduplicatedBy,
   type PersistAssetInput,
+  IdempotencyConflictError,
+  InvalidAssetCursorError,
 } from './repositories/asset-repository.js';
 export { SqliteAssetRepository } from './repositories/sqlite-asset-repository.js';
+export {
+  type ClaimConnectorEventReceiptInput,
+  type ConnectorEventReceiptClaim,
+  type ConnectorEventReceiptRepository,
+  type ReleaseConnectorEventReceiptInput,
+} from './repositories/connector-event-repository.js';
 export {
   type ReminderRepository,
   type ReminderDeliveryRepository,
@@ -31,6 +42,7 @@ export {
   AssetService,
   type AssetServiceOptions,
   type IngestAssetCommand,
+  type ListAssetsCommand,
 } from './services/asset-service.js';
 export {
   SearchService,
@@ -46,9 +58,11 @@ export {
   type AnswerStatus,
 } from './services/answer-service.js';
 export {
+  InvalidReminderTransitionError,
   ReminderService,
   type ReminderObservation,
   type ReminderServiceOptions,
+  type ScheduleReminderCommand,
 } from './services/reminder-service.js';
 export {
   ReminderNotificationWorker,
@@ -56,8 +70,10 @@ export {
   type ReminderNotificationWorkerOptions,
 } from './services/reminder-notification-worker.js';
 export {
+  DEFAULT_MEETING_TIME_ZONE,
   extractMeetingReminder,
   type MeetingReminderCandidate,
+  type MeetingReminderExtractionOptions,
 } from './services/meeting-time-extractor.js';
 export type {
   GenerateAnswerInput,

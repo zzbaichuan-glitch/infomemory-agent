@@ -8,17 +8,18 @@ describe('redactSecrets', () => {
     const result = redactSecrets(`LLM_API_KEY=${secret}`);
 
     expect(result.redactedText).not.toContain(secret);
-    expect(result.redactedText).toContain('[REDACTED:api_key:');
+    expect(result.redactedText).toContain('[REDACTED:api_key]');
     expect(result.findings).toHaveLength(1);
     expect(result.findings[0]?.type).toBe('api_key');
     expect(JSON.stringify(result.findings)).not.toContain(secret);
+    expect(JSON.stringify(result)).not.toContain(secret.slice(-4));
   });
 
   it('redacts bearer tokens while preserving the authorization scheme', () => {
     const token = 'example.bearer.token.with.sufficient.length';
     const result = redactSecrets(`Authorization: Bearer ${token}`);
 
-    expect(result.redactedText).toMatch(/^Authorization: Bearer \[REDACTED:bearer_token:/);
+    expect(result.redactedText).toBe('Authorization: Bearer [REDACTED:bearer_token]');
     expect(result.redactedText).not.toContain(token);
   });
 
@@ -28,8 +29,8 @@ describe('redactSecrets', () => {
       'postgresql://service:database-password@db.internal:5432/app',
     ].join('\n'));
 
-    expect(result.redactedText).toContain('password=[REDACTED:password:');
-    expect(result.redactedText).toContain('postgresql://service:[REDACTED:database_password:');
+    expect(result.redactedText).toContain('password=[REDACTED:password]');
+    expect(result.redactedText).toContain('postgresql://service:[REDACTED:database_password]');
     expect(result.redactedText).toContain('@db.internal:5432/app');
     expect(result.findings.map((finding) => finding.type)).toEqual([
       'password',
@@ -56,5 +57,36 @@ describe('redactSecrets', () => {
     expect(first).toEqual(second);
     expect(first.findings).toHaveLength(2);
     expect(first.findings.every((finding) => finding.end > finding.start)).toBe(true);
+  });
+
+  it.each([
+    ['cloud_access_key', 'AKIAIOSFODNN7EXAMPLE'],
+    ['github_token', `ghp_${'a'.repeat(36)}`],
+    ['service_token', `npm_${'b'.repeat(36)}`],
+    ['jwt', 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signatureValue12345'],
+  ])('redacts high-value %s credentials without retaining any suffix', (type, secret) => {
+    const result = redactSecrets(`credential=${secret}`);
+
+    expect(result.findings.some((finding) => finding.type === type)).toBe(true);
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(JSON.stringify(result)).not.toContain(secret.slice(-4));
+  });
+
+  it('redacts private key blocks and prefixed environment assignments', () => {
+    const privateKey = [
+      '-----BEGIN PRIVATE KEY-----',
+      'c3VwZXItc2VjcmV0LXByaXZhdGUta2V5LW1hdGVyaWFs',
+      '-----END PRIVATE KEY-----',
+    ].join('\n');
+    const appSecret = 'feishu-application-secret-value';
+    const result = redactSecrets(`${privateKey}\nFEISHU_APP_SECRET=${appSecret}`);
+
+    expect(result.findings.map((finding) => finding.type)).toEqual([
+      'private_key',
+      'password',
+    ]);
+    expect(result.redactedText).toContain('[REDACTED:private_key]');
+    expect(JSON.stringify(result)).not.toContain('bWF0ZXJpYWw');
+    expect(JSON.stringify(result)).not.toContain(appSecret.slice(-4));
   });
 });

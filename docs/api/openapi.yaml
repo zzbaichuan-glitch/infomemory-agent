@@ -1,0 +1,444 @@
+openapi: 3.1.0
+info:
+  title: InfoMemory Agent API
+  version: 0.2.0
+  description: >-
+    Security-first enterprise memory API. Production requests use a signed Bearer
+    token. The x-tenant-id/x-user-id development identity is forbidden in production.
+servers:
+  - url: http://127.0.0.1:3000
+    description: Local development
+security:
+  - bearerAuth: []
+  - trustedTenantHeader: []
+    trustedUserHeader: []
+tags:
+  - name: Health
+  - name: Assets
+  - name: Retrieval
+  - name: Reminders
+  - name: Connectors
+paths:
+  /health/live:
+    get:
+      tags: [Health]
+      operationId: getLiveness
+      security: []
+      responses:
+        "200":
+          description: Process is alive
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+  /health/ready:
+    get:
+      tags: [Health]
+      operationId: getReadiness
+      security: []
+      responses:
+        "200":
+          description: Database is ready
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /health:
+    get:
+      tags: [Health]
+      operationId: getHealth
+      security: []
+      responses:
+        "200":
+          description: Compatibility health response; production omits capability details
+  /openapi.yaml:
+    get:
+      tags: [Health]
+      operationId: getOpenApiDocument
+      security: []
+      responses:
+        "200":
+          description: This OpenAPI document
+          content:
+            application/yaml:
+              schema: { type: string }
+  /v1/assets:
+    post:
+      tags: [Assets]
+      operationId: ingestAsset
+      parameters:
+        - name: idempotency-key
+          in: header
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 500 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IngestAsset" }
+      responses:
+        "201":
+          description: Asset created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssetIngestResult" }
+        "200":
+          description: Idempotent or content duplicate
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssetIngestResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    get:
+      tags: [Assets]
+      operationId: listAssets
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 100 } }
+        - { name: cursor, in: query, schema: { type: string, maxLength: 2000 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, maximum: 100000 } }
+        - { name: visibility, in: query, schema: { $ref: "#/components/schemas/AssetVisibility" } }
+        - { name: sourceType, in: query, schema: { $ref: "#/components/schemas/SourceType" } }
+        - { name: createdAfter, in: query, schema: { type: string, format: date-time } }
+        - { name: createdBefore, in: query, schema: { type: string, format: date-time } }
+      responses:
+        "200":
+          description: Permission-filtered page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [assets]
+                properties:
+                  assets:
+                    type: array
+                    items: { $ref: "#/components/schemas/InformationAsset" }
+                  nextCursor: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/assets/{id}:
+    parameters:
+      - $ref: "#/components/parameters/AssetId"
+    get:
+      tags: [Assets]
+      operationId: getAsset
+      responses:
+        "200":
+          description: Accessible asset
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [asset]
+                properties:
+                  asset: { $ref: "#/components/schemas/InformationAsset" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Assets]
+      operationId: deleteOwnedAsset
+      responses:
+        "200":
+          description: Asset and derived SQLite index records deleted by its owner
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/search:
+    post:
+      tags: [Retrieval]
+      operationId: searchEvidence
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Query" }
+      responses:
+        "200":
+          description: Permission-filtered FTS5 evidence
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SearchResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+  /v1/answers:
+    post:
+      tags: [Retrieval]
+      operationId: answerWithEvidence
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Query" }
+      responses:
+        "200":
+          description: Grounded answer or explicit evidence-only degradation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AnswerResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+  /v1/reminders:
+    post:
+      tags: [Reminders]
+      operationId: createReminder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateReminder" }
+      responses:
+        "201":
+          description: Private reminder created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [reminder]
+                properties:
+                  reminder: { $ref: "#/components/schemas/Reminder" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+    get:
+      tags: [Reminders]
+      operationId: listReminders
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, maximum: 100000, default: 0 } }
+        - { name: status, in: query, description: Comma-separated statuses, schema: { type: string } }
+        - { name: dueBefore, in: query, schema: { type: string, format: date-time } }
+      responses:
+        "200":
+          description: Current user's reminders
+  /v1/reminders/due:
+    get:
+      tags: [Reminders]
+      operationId: listDueReminders
+      parameters:
+        - { name: at, in: query, schema: { type: string, format: date-time } }
+      responses:
+        "200": { description: Confirmed reminders due at or before the selected time }
+  /v1/reminders/{id}/status:
+    post:
+      tags: [Reminders]
+      operationId: updateReminderStatus
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 200 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { $ref: "#/components/schemas/ReminderStatus" }
+      responses:
+        "200": { description: Reminder status updated }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /v1/connectors/feishu/events:
+    post:
+      tags: [Connectors]
+      operationId: receiveFeishuEvent
+      security: []
+      description: >-
+        Feishu webhook. When FEISHU_ENCRYPT_KEY is configured, the payload must be
+        encrypted and signed with fresh X-Lark-Request-* headers.
+      parameters:
+        - { name: X-Lark-Request-Timestamp, in: header, schema: { type: string } }
+        - { name: X-Lark-Request-Nonce, in: header, schema: { type: string } }
+        - { name: X-Lark-Signature, in: header, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200": { description: Challenge or acknowledged event }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: HS256 JWT
+    trustedTenantHeader:
+      type: apiKey
+      in: header
+      name: x-tenant-id
+      description: Development/test only; forbidden in production
+    trustedUserHeader:
+      type: apiKey
+      in: header
+      name: x-user-id
+      description: Development/test only; forbidden in production
+  parameters:
+    AssetId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 200 }
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiError" }
+    Unauthorized:
+      description: Missing or invalid authentication
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiError" }
+    Forbidden:
+      description: Authenticated principal lacks permission
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiError" }
+    NotFound:
+      description: Resource is absent or hidden by the access context
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiError" }
+    Conflict:
+      description: Idempotency or state transition conflict
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiError" }
+    ServiceUnavailable:
+      description: Service is not ready
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Readiness" }
+  schemas:
+    ApiError:
+      type: object
+      required: [error, message, requestId]
+      properties:
+        error: { type: string }
+        message: { type: string }
+        requestId: { type: string }
+    Health:
+      type: object
+      required: [status, service, version]
+      properties:
+        status: { type: string, const: ok }
+        service: { type: string, const: infomemory-api }
+        version: { type: string }
+    Readiness:
+      type: object
+      required: [status, service, checks, requestId]
+      properties:
+        status:
+          type: string
+          enum: [ready, not_ready]
+        service: { type: string, const: infomemory-api }
+        checks:
+          type: object
+          required: [database]
+          properties:
+            database:
+              type: string
+              enum: [ok, error]
+        requestId: { type: string }
+    AssetVisibility:
+      type: string
+      enum: [owner, tenant]
+    SourceType:
+      type: string
+      enum: [manual, local_file, feishu_message, feishu_document]
+    SourceReference:
+      type: object
+      required: [type]
+      properties:
+        type: { $ref: "#/components/schemas/SourceType" }
+        externalId: { type: string }
+        url: { type: string, format: uri }
+    IngestAsset:
+      type: object
+      required: [title, content]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 300 }
+        content: { type: string, minLength: 1, maxLength: 1000000 }
+        visibility: { $ref: "#/components/schemas/AssetVisibility" }
+        source: { $ref: "#/components/schemas/SourceReference" }
+    InformationAsset:
+      type: object
+      required: [id, tenantId, ownerId, visibility, title, redactedContent, contentHash, sources, secretFindingCount, createdAt]
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        ownerId: { type: string }
+        visibility: { $ref: "#/components/schemas/AssetVisibility" }
+        title: { type: string }
+        redactedContent: { type: string }
+        contentHash: { type: string }
+        sources:
+          type: array
+          items: { $ref: "#/components/schemas/SourceReference" }
+        secretFindingCount: { type: integer, minimum: 0 }
+        createdAt: { type: string, format: date-time }
+    AssetIngestResult:
+      type: object
+      required: [asset, created]
+      properties:
+        asset: { $ref: "#/components/schemas/InformationAsset" }
+        created: { type: boolean }
+        deduplicatedBy: { type: string, enum: [idempotency, content_hash] }
+    Query:
+      type: object
+      required: [query]
+      properties:
+        query: { type: string, minLength: 1, maxLength: 1000 }
+        limit: { type: integer, minimum: 1, maximum: 20, default: 8 }
+    SearchEvidence:
+      type: object
+      required: [citationId, assetId, title, snippet, score, sources, createdAt]
+      properties:
+        citationId: { type: string }
+        assetId: { type: string }
+        title: { type: string }
+        snippet: { type: string }
+        score: { type: number }
+        sources:
+          type: array
+          items: { $ref: "#/components/schemas/SourceReference" }
+        createdAt: { type: string, format: date-time }
+    SearchResult:
+      type: object
+      required: [mode, query, evidence]
+      properties:
+        mode: { type: string, const: keyword }
+        query: { type: string }
+        evidence:
+          type: array
+          items: { $ref: "#/components/schemas/SearchEvidence" }
+    AnswerResult:
+      type: object
+      required: [status, answer, evidence]
+      properties:
+        status: { type: string, enum: [answered, evidence_only, no_evidence] }
+        answer: { type: string }
+        evidence:
+          type: array
+          items: { $ref: "#/components/schemas/SearchEvidence" }
+        degradedReason: { type: string, enum: [llm_disabled, llm_error, missing_citations] }
+    CreateReminder:
+      type: object
+      required: [title, startsAt]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 300 }
+        startsAt: { type: string, format: date-time }
+        remindAt: { type: string, format: date-time }
+    ReminderStatus:
+      type: string
+      enum: [scheduled, needs_confirmation, completed, cancelled]
+    Reminder:
+      type: object
+      required: [id, tenantId, userId, title, startsAt, remindAt, status, precision, createdAt]
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        userId: { type: string }
+        title: { type: string }
+        startsAt: { type: string, format: date-time }
+        remindAt: { type: string, format: date-time }
+        status: { $ref: "#/components/schemas/ReminderStatus" }
+        precision: { type: string, enum: [exact, period, inferred] }
+        sourceAssetId: { type: string }
+        sourceEventId: { type: string }
+        createdAt: { type: string, format: date-time }

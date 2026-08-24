@@ -18,12 +18,31 @@ const statusSchema = z.object({
   status: z.enum(['scheduled', 'needs_confirmation', 'completed', 'cancelled']),
 });
 
+const createSchema = z.object({
+  title: z.string().trim().min(1).max(300),
+  startsAt: z.iso.datetime(),
+  remindAt: z.iso.datetime().optional(),
+});
+
 const statuses: ReminderStatus[] = ['scheduled', 'needs_confirmation', 'completed', 'cancelled'];
 
 export function registerReminderRoutes(
   app: FastifyInstance,
   reminderService: ReminderService,
 ): void {
+  app.post('/reminders', async (request, reply) => {
+    const body = createSchema.parse(request.body);
+    const reminder = await reminderService.schedule(
+      requireAccessContext(request),
+      {
+        title: body.title,
+        startsAt: body.startsAt,
+        ...(body.remindAt !== undefined ? { remindAt: body.remindAt } : {}),
+      },
+    );
+    return reply.code(201).send({ reminder });
+  });
+
   app.get('/reminders/due', async (request) => {
     const query = z.object({ at: z.iso.datetime().optional() }).parse(request.query);
     return {
@@ -62,6 +81,7 @@ export function registerReminderRoutes(
       return reply.code(404).send({
         error: 'reminder_not_found',
         message: 'Reminder was not found in the current access context',
+        requestId: request.id,
       });
     }
     return { reminder };

@@ -1,163 +1,209 @@
 # 知澜（InfoMemory Agent）
 
-面向飞书和桌面工作流的企业信息记忆 Agent。目标是让成员找到正确、最新、自己有权查看的信息，并回到原始证据，而不是建立另一个依赖人工整理的文件盘。
+> 把散落在消息、文档和本地文件里的信息，变成可追溯、可检索、按权限隔离的团队记忆。
 
-## 项目命名
+[![CI](https://github.com/zzbaichuan-glitch/infomemory-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/zzbaichuan-glitch/infomemory-agent/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/zzbaichuan-glitch/infomemory-agent/actions/workflows/codeql.yml/badge.svg)](https://github.com/zzbaichuan-glitch/infomemory-agent/actions/workflows/codeql.yml)
 
-- 产品展示名：**知澜**。
-- 英文产品名：**InfoMemory Agent**。
-- npm/代码标识：`infomemory-agent`。
-- 推荐 GitHub 仓库名：`infomemory-agent`。
-- 推荐本地目录名：`D:\infomemory-agent`。
+当前版本：`0.2.0`。项目仍处于 pre-1.0 阶段，但已从演示型 MVP 升级为可本地使用、可容器部署、具备明确生产安全边界的模块化单体。
 
-GitHub 仓库已更名为 [`infomemory-agent`](https://github.com/zzbaichuan-glitch/infomemory-agent)，默认分支为 `main`。项目文件已移动到 `D:\infomemory-agent`；旧目录 `D:\信息管理agent` 只剩当前工作区锁定的临时依赖残留，释放工作区后可清理。
+## 现在能做什么
 
-## 当前里程碑
+- 从 HTTP API、跨平台 CLI 和飞书文本事件写入记忆。
+- 在持久化、索引、日志、LLM 和提醒派生之前，统一清洗正文、标题和来源元数据中的常见密钥、令牌、密码与私钥。
+- 使用 SQLite FTS5 全文检索；所有读取在数据库查询层执行租户、所有者和可见性过滤。
+- 生成基于证据的回答；有效陈述必须带 `[S1]` 引用，否则自动安全降级为证据列表。
+- 支持资产游标分页、条件过滤、详情读取和所有者删除。
+- 支持手动提醒、会议时间识别、提醒状态机和进程内通知 worker。
+- 支持飞书回调 Token、Encrypt Key 解密、签名时效校验、事件幂等，以及“搜索 / 问 / 帮助”命令回复。
+- 开发环境可使用可信身份头；生产环境强制使用严格校验的 HS256 Bearer Token。
+- 提供统一错误结构、请求 ID、速率限制、结构化脱敏日志、存活/就绪探针和 OpenAPI。
+- 提供 PowerShell 脚本、Docker Compose、Windows/Linux CI、CodeQL 和 Dependabot。
 
-`codex/mvp-foundation` 分支实现了第一个可运行的安全垂直切片：
+| 能力 | 当前状态 | 边界 |
+|---|---|---|
+| 本地文件与手工信息 | 可用 | UTF-8 文本通过 CLI/API 写入 |
+| 飞书消息接入 | 可用 | 文本事件、验证、加密、签名、幂等 |
+| 飞书搜索与问答 | 试点可用 | 回复仍在 webhook 内执行，尚无持久化任务队列 |
+| 飞书云文档同步 | 待扩展 | 尚无 OAuth、增量同步与 ACL 撤销传播 |
+| 检索 | 可用 | SQLite FTS5；尚无向量检索与重排 |
+| LLM 问答 | 可选 | OpenAI-compatible；失败时安全降级 |
+| 多实例部署 | 待扩展 | SQLite + 进程内 worker 适合单实例试点 |
+| 桌面 GUI | 待扩展 | 当前提供 HTTP API 与 CLI |
 
-- 文本资产入库、SHA-256 安全内容去重和幂等键。
-- API Key、Bearer Token、密码和数据库 URL 密码在持久化前脱敏。
-- 租户隔离、租户可见和上传者可见两种基础访问范围。
-- 确定性的关键词证据搜索和稳定引用 ID。
-- OpenAI-compatible `/chat/completions` 适配器。
-- 模型关闭、超时、失败或答案无引用时自动降级为证据列表。
-- 飞书 URL verification、事件 Token 验证、文本事件标准化和重复事件去重。
-- 从飞书文本中识别明确或模糊的会议时间，创建用户私有的日程提醒候选；模糊时间会标记为待确认。
-- 飞书租户 access token 缓存、机器人主动文本通知、加密事件 payload 解密和提醒投递去重。
-- SQLite 本地存储、HTTP API、类型检查、单元测试和冒烟测试脚本。
+## 安全模型
 
-尚未实现：生产身份认证、飞书 OAuth/权限同步、云文档同步、向量检索、桌面 UI、OCR、系统级通知/闹钟调度、完整审计和生产数据库。这些能力不能从当前健康检查中被误判为已完成。当前版本可以在飞书中给用户发送主动文本通知，但正式上线前仍需部署 HTTPS、完成应用授权和生产身份接入。
-
-## 安全提醒
-
-曾通过聊天发送的 API Key 应立即撤销和轮换。不要把任何真实 Key 写入源码、README、Git 提交、命令参数或日志。
-
-项目默认 `LLM_ENABLED=false`。轮换后，只把新 Key 放到被 Git 忽略的 `.env.local`：
-
-```dotenv
-LLM_ENABLED=true
-LLM_BASE_URL=https://llm-gw.bupt.edu.cn/v1
-LLM_API_KEY=<rotated-key>
-LLM_MODEL=<model-id-supported-by-the-gateway>
+```mermaid
+flowchart LR
+  A[API / CLI / 飞书] --> B[认证与回调校验]
+  B --> C[输入和元数据规范化]
+  C --> D[密钥脱敏]
+  D --> E[SQLite + FTS5]
+  E --> F[租户/用户权限过滤]
+  F --> G[证据检索]
+  G --> H[引用门控回答]
+  G --> I[提醒与飞书回复]
 ```
 
-模型名称必须根据网关实际支持列表填写。本项目不会猜测一个模型名并把它作为生产默认值。
+关键约束：
 
-飞书接入配置放在项目根目录的 `.env.local`（该文件被 Git 忽略）：
+- `trusted_headers` 仅允许 development/test，production 会拒绝启动。
+- Bearer Token 严格校验算法、签名、issuer、audience、时效、租户、用户和角色。
+- 租户共享写入需要 `asset:share_tenant` 权限或 `knowledge_manager` 角色。
+- 幂等范围包含租户、用户、操作和请求指纹；同一 key 配不同请求会冲突。
+- 标题、正文、外部 ID 和来源 URL 都经过安全规范化；URL 仅接受安全协议。
+- 飞书配置 Encrypt Key 后拒绝明文降级，签名采用恒定时间比较并限制时间窗口。
+- 本项目不是密码库。真实密钥应进入 Secret Manager，知澜只保存安全引用。
 
-```dotenv
-FEISHU_NOTIFICATIONS_ENABLED=true
-FEISHU_VERIFICATION_TOKEN=<verification-token>
-FEISHU_APP_ID=<cli_xxx>
-FEISHU_APP_SECRET=<app-secret>
-FEISHU_API_BASE_URL=https://open.feishu.cn
-FEISHU_API_TIMEOUT_MS=10000
-FEISHU_ENCRYPT_KEY=<optional-encrypt-key>
-REMINDER_POLL_INTERVAL_MS=15000
+详细边界见 [SECURITY.md](SECURITY.md)。
+
+## 项目结构
+
+```text
+apps/api/                 Fastify API、认证、飞书适配器、Token 工具
+packages/core/            领域服务、脱敏、检索、提醒、SQLite 仓储与迁移
+scripts/                  安装、开发、验证、审计、冒烟与知澜 CLI
+docs/api/openapi.yaml     OpenAPI 3.1 契约
+docs/architecture/        架构与安全不变量
+docs/plans/               PRD、实施计划和设计记录
+.github/workflows/        CI 与 CodeQL
+Dockerfile                非 root 多阶段镜像
+compose.yaml              单实例部署示例
 ```
 
-只有在飞书应用已经授权发送消息权限后，才把 `FEISHU_NOTIFICATIONS_ENABLED` 设为 `true`。不要把 `App Secret` 或 Encrypt Key 写入 Git、命令行参数或聊天记录。
+## 快速开始
 
-## 环境要求
+要求 Node.js 24+、npm 11+；PowerShell 入口建议使用 PowerShell 7。
 
-- Windows 10/11 或兼容 PowerShell 环境。
-- Node.js 24+。
-- npm 11+。
-- 当前切片不依赖 Docker。
-
-## 安装调用链
-
-用户输入：
+### 安装
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 ```
 
-完整调用链：
+实际调用链：
 
 ```text
-用户 PowerShell
-└─ scripts/install.ps1
-   └─ npm install --cache .npm-cache --registry https://registry.npmjs.org
-      ├─ 安装根开发依赖：TypeScript、Vitest、tsx
-      ├─ 安装 packages/core 依赖：Zod
-      └─ 安装 apps/api 依赖：Fastify、dotenv、Zod、@infomemory/core
+scripts/install.ps1
+└─ npm ci --cache .npm-cache --registry https://registry.npmjs.org
+   ├─ 根 workspace
+   ├─ packages/core
+   └─ apps/api
 ```
 
-项目内 `.npm-cache` 已被 Git 忽略，用于避开部分 Windows 环境的全局 npm 缓存权限冲突。
+跨平台可直接运行 `npm ci --registry=https://registry.npmjs.org`。
 
-## 开发运行调用链
-
-用户输入：
+### 配置与开发启动
 
 ```powershell
+Copy-Item .env.example .env.local
 powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1
 ```
 
-完整调用链：
+实际调用链：
 
 ```text
-用户 PowerShell
-└─ scripts/dev.ps1
-   └─ npm run dev --workspace @infomemory/api
-      ├─ apps/api predev
-      │  └─ npm run build --workspace @infomemory/core
-      │     └─ tsc -p packages/core/tsconfig.json
-      └─ apps/api dev
-         └─ tsx watch apps/api/src/server.ts
-            ├─ 加载 .env.local / .env
-            ├─ 初始化 SQLite
-            └─ 监听 127.0.0.1:3000
+scripts/dev.ps1
+└─ npm run dev --workspace @infomemory/api
+   ├─ predev: npm run build --workspace @infomemory/core
+   └─ tsx watch apps/api/src/server.ts
 ```
 
-## 构建后运行调用链
+本地默认使用 `NODE_ENV=development`、`AUTH_MODE=trusted_headers`，并关闭 LLM 和飞书出站通知。`.env.local` 已被 Git 忽略。
 
-用户输入：
+默认端点：
+
+- `GET /health/live`：存活
+- `GET /health/ready`：SQLite 就绪
+- `GET /health`：兼容健康页
+- `GET /openapi.yaml`：OpenAPI 文档
+
+### 使用 CLI
+
+开发模式先设置身份：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\start.ps1
+$env:INFOMEMORY_TENANT_ID = "demo-tenant"
+$env:INFOMEMORY_USER_ID = "alice"
 ```
 
-完整调用链：
-
-```text
-用户 PowerShell
-└─ scripts/start.ps1
-   └─ npm run start --workspace @infomemory/api
-      ├─ apps/api prestart
-      │  ├─ tsc -p packages/core/tsconfig.json
-      │  └─ tsc -p apps/api/tsconfig.json
-      └─ apps/api start
-         └─ node apps/api/dist/server.js
-```
-
-## 测试调用链
-
-用户输入：
+常用命令：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\test.ps1
+npm run agent -- health
+npm run agent -- ingest --file .\README.md --title "知澜项目说明"
+npm run agent -- assets --limit 20
+npm run agent -- search 知澜 安全
+npm run agent -- ask 知澜的安全边界是什么
+npm run agent -- remind --title "项目复盘" --starts-at "2026-09-01T02:00:00.000Z"
+npm run agent -- reminders --status scheduled
+npm run agent -- --help
 ```
 
-完整调用链：
+入口链：
 
 ```text
-用户 PowerShell
-└─ scripts/test.ps1
-   └─ npm run test
-      ├─ packages/core: vitest run
-      │  ├─ 脱敏测试
-      │  ├─ 资产/权限测试
-      │  └─ 搜索、引用回答和 LLM 客户端测试
-      └─ apps/api
-         ├─ pretest → tsc -p packages/core/tsconfig.json
-         └─ vitest run → HTTP API 与飞书回调测试
+npm run agent -- <command>
+└─ node scripts/zhilan.mjs
+
+powershell -File scripts/zhilan.ps1 <command>
+└─ node scripts/zhilan.mjs
 ```
 
-## 全量验证调用链
+## 生产认证
 
-用户输入：
+真实部署应由 Secret Manager 注入至少 32 字节的随机密钥。下面仅演示本地 PowerShell：
+
+```powershell
+$env:AUTH_SECRET = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(48))
+$env:AUTH_MODE = "bearer"
+$env:AUTH_ISSUER = "infomemory-agent"
+$env:AUTH_AUDIENCE = "infomemory-api"
+$env:INFOMEMORY_TOKEN = npm run --silent token -- --tenant acme --user alice --roles member --expires-in 8h
+```
+
+Token 调用链：
+
+```text
+npm run token -- <args>
+└─ npm run token --workspace @infomemory/api --
+   └─ tsx apps/api/src/cli/generate-access-token.ts
+      └─ apps/api/src/auth/access-token.ts
+```
+
+租户共享资产需要 `--roles member,asset:share_tenant` 或 `knowledge_manager`。生产还必须在入口层终止 HTTPS，并做好密钥轮换、备份加密与监控告警。
+
+## HTTP API
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/health/live` | 进程存活 |
+| GET | `/health/ready` | SQLite 就绪 |
+| GET | `/openapi.yaml` | OpenAPI 3.1 |
+| POST | `/v1/assets` | 写入；必须带 `idempotency-key` |
+| GET | `/v1/assets` | 游标分页与过滤 |
+| GET/DELETE | `/v1/assets/:id` | 授权详情 / 所有者删除 |
+| POST | `/v1/search` | 权限过滤的证据检索 |
+| POST | `/v1/answers` | 引用门控问答 |
+| POST/GET | `/v1/reminders` | 创建 / 查询提醒 |
+| POST | `/v1/reminders/:id/status` | 推进提醒状态 |
+| POST | `/v1/connectors/feishu/events` | 飞书回调 |
+
+完整请求、响应、认证和错误结构见 [OpenAPI](docs/api/openapi.yaml)。普通 API 错误都包含稳定 `error`、安全 `message` 和 `requestId`。
+
+## 飞书接入
+
+1. 在飞书开放平台创建企业自建应用并启用机器人。
+2. 配置事件地址 `https://你的域名/v1/connectors/feishu/events`。
+3. 订阅 `im.message.receive_v1`，配置 Verification Token；推荐启用 Encrypt Key。
+4. 需要命令回复/提醒时，授予最小消息发送权限，并配置 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_NOTIFICATIONS_ENABLED=true`。
+5. 使用 HTTPS；不要把 trusted-header 模式暴露到公网。
+
+支持“帮助”“搜索 <关键词>”“问 <问题>”。普通文本会先脱敏再进入记忆并尝试识别会议时间；命令本身不会污染记忆。
+
+当前命令在 webhook 内同步执行。公网飞书部署前应增加持久化 inbox/outbox、带租约的异步 worker、重试与死信队列，以满足快速 ACK 和故障恢复要求。
+
+## 验证、测试与审计
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1
@@ -166,99 +212,70 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1
 完整调用链：
 
 ```text
-用户 PowerShell
-└─ scripts/verify.ps1
-   ├─ npm run typecheck
-   │  ├─ tsc --noEmit -p packages/core/tsconfig.json
-   │  └─ tsc --noEmit -p apps/api/tsconfig.json
-   ├─ npm run test
-   │  └─ 见“测试调用链”
-   └─ npm run build
-      ├─ tsc -p packages/core/tsconfig.json
-      └─ tsc -p apps/api/tsconfig.json
+scripts/verify.ps1
+├─ npm run typecheck
+│  ├─ packages/core: tsc --noEmit
+│  └─ apps/api: tsc --noEmit
+├─ npm run test
+│  ├─ packages/core: vitest run
+│  └─ apps/api: vitest run
+└─ npm run build
+   ├─ packages/core: tsc
+   └─ apps/api: tsc
 ```
 
-## HTTP 冒烟测试调用链
+独立入口：
 
-先在一个终端启动服务，再在第二个终端输入：
+- `scripts/test.ps1 → npm run test`
+- `scripts/audit.ps1 → npm run audit:dependencies -- --cache .npm-cache`
+- `scripts/smoke.ps1`：服务启动后的 trusted-header 或 Bearer 端到端冒烟；Bearer 模式先设置 `INFOMEMORY_TOKEN`。
+
+## 生产启动
+
+Node 入口：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\smoke.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\start.ps1
 ```
-
-完整调用链：
 
 ```text
-用户 PowerShell
-└─ scripts/smoke.ps1
-   ├─ Invoke-RestMethod GET /health
-   ├─ Invoke-RestMethod POST /v1/assets
-   ├─ Invoke-RestMethod POST /v1/search
-   └─ Invoke-RestMethod POST /v1/answers
+scripts/start.ps1
+└─ npm run start --workspace @infomemory/api
+   ├─ prestart: 构建 packages/core 与 apps/api
+   └─ node apps/api/dist/server.js
 ```
 
-冒烟脚本提交一个包含示例密码的文本，预期 `secretFindingCount=1`，搜索返回证据，并因默认关闭 LLM 而返回 `evidence_only / llm_disabled`。
+Docker Compose：
 
-## API
-
-除健康检查和飞书回调外，当前开发 API 使用以下临时请求头模拟访问上下文：
-
-```text
-x-tenant-id: <tenant-id>
-x-user-id: <user-id>
+```powershell
+$env:AUTH_SECRET = "<从 Secret Manager 注入的至少 32 字节随机值>"
+docker compose up --build -d
+docker compose ps
+Invoke-RestMethod http://127.0.0.1:3000/health/ready
 ```
 
-这不是生产认证。接入飞书 OAuth 后，服务端必须从已验证身份生成访问上下文，不能信任客户端自报的请求头。
+停止：`docker compose down`。`Dockerfile` 使用多阶段构建、锁文件安装、生产依赖裁剪、非 root 用户和健康检查；`compose.yaml` 默认仅绑定本机环回地址，并持久化 `/app/var`。
 
-| 方法 | 路径 | 功能 |
-| --- | --- | --- |
-| GET | `/health` | 健康状态与真实能力列表 |
-| POST | `/v1/assets` | 文本资产入库；要求 `idempotency-key` |
-| GET | `/v1/assets` | 列出当前访问上下文可见资产 |
-| POST | `/v1/search` | 关键词证据搜索 |
-| POST | `/v1/answers` | 有引用约束的回答或证据降级 |
-| GET | `/v1/reminders` | 列出当前用户的私有会议提醒，可按状态和到期时间过滤 |
-| GET | `/v1/reminders/due` | 列出当前时刻前需要触发的已确认提醒 |
-| POST | `/v1/reminders/:id/status` | 确认、完成或取消提醒 |
-| POST | `/v1/connectors/feishu/events` | 飞书验证与事件回调 |
+## 明确的后续扩展
 
-## 飞书回调基础
+要进入大规模多租户生产，还需要：
 
-当前可以把飞书事件订阅 URL 指向：
-
-```text
-https://<public-host>/v1/connectors/feishu/events
-```
-
-需要配置 `FEISHU_VERIFICATION_TOKEN`。服务端支持 `url_verification`、`im.message.receive_v1` 文本消息和 Encrypt Key 加密 payload；只保存机器人收到的事件，默认按发送者个人可见。图片、文件、历史消息拉取、OAuth 和源权限同步尚未实现。
-
-当文本包含“明天 14:30 开会”这类明确时间时，回调会创建 `scheduled` 提醒；“下午要开会”这类信息会创建 `needs_confirmation` 提醒，默认使用下午 15:00 作为候选时间并提前 60 分钟提醒。
-
-将 `FEISHU_NOTIFICATIONS_ENABLED=true` 并配置 `FEISHU_APP_ID`、`FEISHU_APP_SECRET` 后，服务会：
-
-1. 收到可识别的会议消息后，给发送者发送一条确认或待确认文本消息。
-2. 每 `REMINDER_POLL_INTERVAL_MS` 检查到期提醒。
-3. 通过飞书机器人发送到期提醒。
-4. 在 SQLite 中记录投递状态；成功投递不会重复发送，临时失败会释放租约并重试。
-
-## 飞书测试企业接入步骤
-
-推荐先使用测试企业或测试群，不要直接接入正式工作群。
-
-1. 在飞书开放平台创建“企业自建应用”，启用机器人能力。
-2. 在事件订阅中启用 `im.message.receive_v1`，把事件订阅地址填为 `https://<public-host>/v1/connectors/feishu/events`。
-3. 在权限管理中授予机器人接收消息和以应用身份发送消息的最小权限；具体权限名称以当前飞书控制台显示为准。
-4. 生成并保存 `App ID`、`App Secret` 和 `Verification Token`。如果在事件订阅中启用了 Encrypt Key，同时保存 `Encrypt Key`。
-5. 将这些值写入本机项目根目录的 `.env.local`，不要发到聊天、提交到 Git 或写进启动命令参数。
-6. 启动服务并完成飞书的 URL verification。飞书后台验证通过后，把机器人加入测试群。
-7. 在测试群发送“明天 14:30 开会讨论上线方案”，预期收到一条确认消息；到了提醒时间，后台 worker 会再发一条到期提醒。
-
-当前服务仍使用开发身份头保护产品 API；飞书事件本身从已验证事件 payload 推导租户和用户。正式公网部署前必须补充 OAuth/session 身份边界、HTTPS、请求限流、审计和密钥轮换。
-
-开发环境不应把未认证的本地服务直接暴露到公网。正式接入前仍需补充 HTTPS、请求限流、生产身份和完整审计。
+- PostgreSQL、对象存储和可靠消息队列，替代 SQLite 与进程内 worker。
+- 飞书 OAuth、云文档/知识库增量同步、来源 ACL 快照与撤销传播。
+- 事务性连接器 inbox/outbox，消除 webhook 同步处理与进程崩溃窗口。
+- 向量检索、重排、离线相关性评测与可观测性指标。
+- 企业 SSO/JWKS 或独立身份服务，替代本地 HS256 签发器。
+- 桌面端、全局快捷键、卡片确认与管理后台。
 
 ## 文档
 
+- [v0.2 安全与可用性设计](docs/plans/2026-08-23-v0.2-secure-usability-design.md)
+- [架构与安全不变量](docs/architecture/mvp-foundation.md)
 - [产品需求文档](docs/plans/2026-08-19-information-memory-agent-prd.md)
-- [MVP 实施计划](docs/plans/2026-08-19-mvp-foundation-implementation.md)
-- [MVP 基础架构](docs/architecture/mvp-foundation.md)
+- [贡献指南](CONTRIBUTING.md)
+- [安全策略](SECURITY.md)
+- [OpenAPI](docs/api/openapi.yaml)
+
+## License
+
+当前仓库尚未声明开源许可证。在添加明确的 `LICENSE` 前，默认保留全部权利。

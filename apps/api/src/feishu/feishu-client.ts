@@ -114,7 +114,11 @@ export class FeishuClient implements FeishuMessenger {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.#timeoutMs);
     try {
-      const response = await this.#fetch(url, { ...init, signal: controller.signal });
+      const response = await this.#fetch(url, {
+        ...init,
+        redirect: 'error',
+        signal: controller.signal,
+      });
       if (!response.ok) throw new FeishuApiError(`Feishu API returned HTTP ${response.status}`);
       try {
         return await response.json();
@@ -131,10 +135,13 @@ export class FeishuClient implements FeishuMessenger {
   }
 }
 
-export function formatReminderNotification(reminder: Reminder): string {
+export function formatReminderNotification(
+  reminder: Reminder,
+  timeZone = 'Asia/Shanghai',
+): string {
   const startsAt = new Date(reminder.startsAt);
   const formatted = new Intl.DateTimeFormat('zh-CN', {
-    timeZone: 'Asia/Shanghai',
+    timeZone,
     year: 'numeric',
     month: 'numeric',
     day: 'numeric',

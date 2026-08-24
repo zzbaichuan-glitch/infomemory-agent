@@ -79,6 +79,47 @@ describe('AnswerService', () => {
     });
   });
 
+  it('rejects answers with uncited claims or references outside the evidence set', async () => {
+    await seedEvidence();
+    const partiallyCited = new AnswerService(search, {
+      generate: vi.fn().mockResolvedValue('平台组负责维护。[S1]\n密码已经完成轮换。'),
+    });
+    const invalidReference = new AnswerService(search, {
+      generate: vi.fn().mockResolvedValue('平台组负责维护。[S2]'),
+    });
+
+    await expect(partiallyCited.answer(alice, { query: '数据库配置' }))
+      .resolves.toMatchObject({
+        status: 'evidence_only',
+        degradedReason: 'missing_citations',
+      });
+    await expect(invalidReference.answer(alice, { query: '数据库配置' }))
+      .resolves.toMatchObject({
+        status: 'evidence_only',
+        degradedReason: 'missing_citations',
+      });
+  });
+
+  it('never sends secrets from a user query to the LLM generator', async () => {
+    await assets.ingest(alice, {
+      title: '数据库密码轮换说明',
+      content: '数据库密码由平台组负责轮换。',
+      idempotencyKey: 'password-rotation',
+      visibility: 'tenant',
+    });
+    const generate = vi.fn().mockResolvedValue('平台组负责轮换。[S1]');
+    const service = new AnswerService(search, { generate });
+
+    await service.answer(alice, {
+      query: '数据库密码 password=synthetic-query-secret 由谁轮换',
+    });
+
+    expect(generate).toHaveBeenCalledOnce();
+    const input = generate.mock.calls[0]?.[0] as { query: string };
+    expect(input.query).not.toContain('synthetic-query-secret');
+    expect(input.query).toContain('[REDACTED:password]');
+  });
+
   async function seedEvidence(): Promise<void> {
     await assets.ingest(alice, {
       title: '数据库配置说明',

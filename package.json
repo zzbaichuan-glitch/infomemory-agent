@@ -1,6 +1,6 @@
 {
   "name": "infomemory-agent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Security-first enterprise information memory agent for Feishu and desktop workflows.",
   "type": "module",
@@ -19,7 +19,10 @@
     "typecheck": "npm run typecheck --workspace @infomemory/core && npm run typecheck --workspace @infomemory/api",
     "test": "npm run test --workspace @infomemory/core && npm run test --workspace @infomemory/api",
     "test:watch": "npm run test:watch --workspaces --if-present",
-    "verify": "npm run typecheck && npm run test && npm run build"
+    "verify": "npm run typecheck && npm run test && npm run build",
+    "token": "npm run token --workspace @infomemory/api --",
+    "agent": "node scripts/zhilan.mjs",
+    "audit:dependencies": "npm audit --audit-level=high --registry=https://registry.npmjs.org"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

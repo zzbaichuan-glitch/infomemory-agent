@@ -9,26 +9,41 @@ import {
   type LlmAnswerGenerator,
 } from '@infomemory/core';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { ZodError } from 'zod';
 
-import {
-  FeishuConfigurationError,
-  FeishuEventService,
-  FeishuPayloadError,
-  FeishuVerificationError,
-} from './feishu/feishu-event-service.js';
+import { FeishuEventService } from './feishu/feishu-event-service.js';
+import { FeishuCommandService } from './feishu/feishu-command-service.js';
 import type { FeishuMessenger } from './feishu/feishu-client.js';
-import { accessContextPlugin } from './plugins/access-context.js';
+import { registerErrorHandling } from './http/error-handling.js';
+import { registerJsonMediaTypeGuard } from './http/media-type.js';
+import type { SafeLoggerOptions } from './logging.js';
+import {
+  accessContextPlugin,
+  type AuthenticationOptions,
+  validateAuthenticationOptions,
+} from './plugins/access-context.js';
+import {
+  registerRateLimit,
+  type RateLimitOptions,
+} from './plugins/rate-limit.js';
 import { registerAnswerRoute } from './routes/answers.js';
 import { registerAssetRoutes } from './routes/assets.js';
 import { registerFeishuEventRoute } from './routes/feishu-events.js';
 import { registerHealthRoute } from './routes/health.js';
+import { registerOpenApiRoute } from './routes/openapi.js';
 import { registerSearchRoute } from './routes/search.js';
 import { registerReminderRoutes } from './routes/reminders.js';
 
 export interface BuildAppOptions {
   databasePath?: string;
-  logger?: boolean;
+  logger?: boolean | SafeLoggerOptions;
+  nodeEnv?: 'development' | 'test' | 'production';
+  authentication?: AuthenticationOptions;
+  timeZone?: string;
+  bodyLimitBytes?: number;
+  requestTimeoutMs?: number;
+  connectionTimeoutMs?: number;
+  rateLimit?: RateLimitOptions | false;
+  readinessCheck?: () => Promise<void>;
   llmGenerator?: LlmAnswerGenerator;
   llmEnabled?: boolean;
   feishuVerificationToken?: string;
@@ -40,12 +55,26 @@ export interface BuildAppOptions {
 }
 
 export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
-  const app = Fastify({ logger: options.logger ?? false });
+  const authentication = options.authentication ?? {
+    mode: 'trusted_headers' as const,
+    environment: options.nodeEnv ?? 'development',
+  };
+  validateAuthenticationOptions(authentication);
+  const app = Fastify({
+    logger: options.logger ?? false,
+    bodyLimit: positiveInteger(options.bodyLimitBytes, 4 * 1_024 * 1_024),
+    requestTimeout: positiveInteger(options.requestTimeoutMs, 30_000),
+    connectionTimeout: positiveInteger(options.connectionTimeoutMs, 125_000),
+    keepAliveTimeout: 72_000,
+  });
   const repository = new SqliteAssetRepository(options.databasePath ?? ':memory:');
   const assetService = new AssetService(repository);
   const searchService = new SearchService(repository);
   const answerService = new AnswerService(searchService, options.llmGenerator);
-  const reminderService = new ReminderService(repository);
+  const feishuCommands = new FeishuCommandService(searchService, answerService);
+  const reminderService = new ReminderService(repository, {
+    ...(options.timeZone ? { timeZone: options.timeZone } : {}),
+  });
   const reminderWorker = options.reminderWorkerEnabled && options.reminderNotifier
     ? new ReminderNotificationWorker(repository, options.reminderNotifier, {
       ...(options.reminderPollIntervalMs !== undefined
@@ -63,6 +92,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
         : {}),
       ...(options.feishuEncryptKey ? { encryptKey: options.feishuEncryptKey } : {}),
       ...(options.feishuMessenger ? { messenger: options.feishuMessenger } : {}),
+      ...(options.timeZone ? { timeZone: options.timeZone } : {}),
+      commandService: feishuCommands,
+      eventReceipts: repository,
     },
   );
 
@@ -70,52 +102,23 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     reminderWorker?.stop();
     repository.close();
   });
-  app.setErrorHandler(async (error, request, reply) => {
-    if (error instanceof ZodError) {
-      return reply.code(400).send({
-        error: 'validation_error',
-        message: 'Request validation failed',
-      });
-    }
-    if (error instanceof FeishuVerificationError) {
-      return reply.code(401).send({
-        error: 'feishu_verification_failed',
-        message: 'Feishu callback verification failed',
-      });
-    }
-    if (error instanceof FeishuPayloadError) {
-      return reply.code(400).send({
-        error: 'feishu_payload_invalid',
-        message: 'Feishu callback payload could not be decrypted',
-      });
-    }
-    if (error instanceof FeishuConfigurationError) {
-      return reply.code(503).send({
-        error: 'feishu_not_configured',
-        message: 'Feishu callback is not configured',
-      });
-    }
-
-    request.log.error({
-      errorName: error instanceof Error ? error.name : 'UnknownError',
-      errorMessage: error instanceof Error ? error.message : 'Unknown failure',
-      requestId: request.id,
-    }, 'request failed');
-    return reply.code(500).send({
-      error: 'internal_error',
-      message: 'The request could not be completed',
-      requestId: request.id,
-    });
-  });
+  registerErrorHandling(app);
+  if (options.rateLimit !== false) registerRateLimit(app, options.rateLimit);
+  registerJsonMediaTypeGuard(app);
 
   registerHealthRoute(app, {
     llmEnabled: options.llmEnabled ?? Boolean(options.llmGenerator),
     feishuConfigured: Boolean(options.feishuVerificationToken),
     feishuNotificationsEnabled: Boolean(options.feishuMessenger),
+    exposeDetails: (options.nodeEnv ?? 'development') !== 'production',
+    readinessCheck: options.readinessCheck ?? (async () => {
+      await repository.list({ tenantId: '__health__', userId: '__health__' }, { limit: 1 });
+    }),
   });
+  await registerOpenApiRoute(app);
 
   await app.register(async (secured) => {
-    await accessContextPlugin(secured);
+    await accessContextPlugin(secured, authentication);
     registerAssetRoutes(secured, assetService, repository);
     registerSearchRoute(secured, searchService);
     registerAnswerRoute(secured, answerService);
@@ -129,4 +132,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   reminderWorker?.start();
 
   return app;
+}
+
+function positiveInteger(value: number | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new RangeError('Fastify limits and timeouts must be positive integers');
+  }
+  return value;
 }

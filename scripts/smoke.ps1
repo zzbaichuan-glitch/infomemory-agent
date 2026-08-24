@@ -1,11 +1,16 @@
 param(
-  [string]$BaseUrl = 'http://127.0.0.1:3000'
+  [string]$BaseUrl = 'http://127.0.0.1:3000',
+  [string]$Token = $env:INFOMEMORY_TOKEN
 )
 
 $ErrorActionPreference = 'Stop'
-$headers = @{
-  'x-tenant-id' = 'smoke-tenant'
-  'x-user-id' = 'smoke-user'
+$headers = if ($Token) {
+  @{ 'authorization' = "Bearer $Token" }
+} else {
+  @{
+    'x-tenant-id' = 'smoke-tenant'
+    'x-user-id' = 'smoke-user'
+  }
 }
 $idempotencyHeaders = $headers.Clone()
 $idempotencyHeaders['idempotency-key'] = "smoke-$([guid]::NewGuid().ToString('N'))"

@@ -8,7 +8,12 @@ export class FeishuPayloadError extends Error {
 }
 
 export function decodeFeishuPayload(payload: unknown, encryptKey?: string): unknown {
-  if (!isRecord(payload) || typeof payload.encrypt !== 'string') return payload;
+  if (!isRecord(payload) || typeof payload.encrypt !== 'string') {
+    if (encryptKey?.trim()) {
+      throw new FeishuPayloadError('Feishu encrypted payload is required');
+    }
+    return payload;
+  }
   if (!encryptKey?.trim()) throw new FeishuPayloadError('Feishu encrypted payload cannot be decrypted');
   try {
     const key = createHash('sha256').update(encryptKey.trim(), 'utf8').digest();

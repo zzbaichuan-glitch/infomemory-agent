@@ -48,10 +48,10 @@ export class AnswerService {
 
     try {
       const answer = await this.generator.generate({
-        query: command.query,
+        query: search.query,
         evidence: search.evidence,
       });
-      if (!hasValidCitation(answer, search.evidence.length)) {
+      if (!hasGroundedCitations(answer, search.evidence.length)) {
         return this.#evidenceOnly(search.evidence, 'missing_citations');
       }
       return { status: 'answered', answer, evidence: search.evidence };
@@ -74,10 +74,39 @@ export class AnswerService {
   }
 }
 
-function hasValidCitation(answer: string, evidenceCount: number): boolean {
-  return Array.from(answer.matchAll(/\[S(\d+)]/g))
-    .some((match) => {
-      const index = Number(match[1]);
-      return Number.isInteger(index) && index >= 1 && index <= evidenceCount;
-    });
+function hasGroundedCitations(answer: string, evidenceCount: number): boolean {
+  const references = Array.from(answer.matchAll(/\[S(\d+)]/g));
+  if (references.length === 0) return false;
+  if (references.some((match) => !isValidReference(match, evidenceCount))) return false;
+
+  const claims = answer
+    .split(/\r?\n/u)
+    .flatMap((line) => splitClaims(line))
+    .map((claim) => claim.trim())
+    .filter(hasSubstantiveText);
+
+  return claims.length > 0 && claims.every((claim) =>
+    Array.from(claim.matchAll(/\[S(\d+)]/g))
+      .some((match) => isValidReference(match, evidenceCount)));
+}
+
+function splitClaims(line: string): string[] {
+  const claims = line.match(/[^。！？!?]+(?:[。！？!?](?:\s*\[S\d+\])*)?/gu);
+  return claims ?? [];
+}
+
+function hasSubstantiveText(value: string): boolean {
+  return value
+    .replace(/\[S\d+]/g, '')
+    .replace(/^[\s#>*\-+\d.)、]+/u, '')
+    .trim()
+    .length > 0;
+}
+
+function isValidReference(
+  match: RegExpMatchArray,
+  evidenceCount: number,
+): boolean {
+  const index = Number(match[1]);
+  return Number.isInteger(index) && index >= 1 && index <= evidenceCount;
 }

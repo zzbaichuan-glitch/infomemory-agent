@@ -87,4 +87,35 @@ describe('SearchService', () => {
   it('rejects empty queries', async () => {
     await expect(search.search(alice, { query: '   ' })).rejects.toThrow('query');
   });
+
+  it('redacts secrets from the returned search query', async () => {
+    const result = await search.search(alice, {
+      query: '部署 password=synthetic-search-secret',
+    });
+
+    expect(result.query).toBe('部署 password=[REDACTED:password]');
+    expect(result.query).not.toContain('synthetic-search-secret');
+  });
+
+  it('finds an older matching asset after more than 500 newer assets exist', async () => {
+    const oldest = await assets.ingest(alice, {
+      title: '远古唯一关键词档案',
+      content: '这条证据必须通过 FTS5 从完整授权集合中找到。',
+      idempotencyKey: 'oldest-searchable',
+      visibility: 'tenant',
+    });
+    for (let index = 0; index < 501; index += 1) {
+      await assets.ingest(alice, {
+        title: `普通资料 ${index}`,
+        content: `这是无关的普通记录 ${index}。`,
+        idempotencyKey: `newer-${index}`,
+        visibility: 'tenant',
+      });
+    }
+
+    const result = await search.search(alice, { query: '远古唯一关键词' });
+
+    expect(result.evidence[0]?.assetId).toBe(oldest.asset.id);
+    expect(result.evidence.some((item) => item.assetId === oldest.asset.id)).toBe(true);
+  });
 });

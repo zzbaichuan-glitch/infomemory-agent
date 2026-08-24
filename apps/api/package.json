@@ -1,6 +1,6 @@
 {
   "name": "@infomemory/api",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "pretest": "npm run build --workspace @infomemory/core",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "token": "tsx src/cli/generate-access-token.ts"
   },
   "dependencies": {
     "@infomemory/core": "*",

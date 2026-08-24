@@ -48,6 +48,7 @@ describe('Feishu callback foundation', () => {
     expect(response.json()).toEqual({
       error: 'feishu_verification_failed',
       message: 'Feishu callback verification failed',
+      requestId: expect.any(String),
     });
   });
 
@@ -136,6 +137,88 @@ describe('Feishu callback foundation', () => {
       processed: false,
       reason: 'unsupported_message_type',
     });
+  });
+
+  it('executes idempotent search commands without polluting the memory index', async () => {
+    await app.inject({
+      method: 'POST',
+      url: '/v1/assets',
+      headers: {
+        'x-tenant-id': 'tenant-key-1',
+        'x-user-id': 'open-id-1',
+        'idempotency-key': 'seed-command-search',
+      },
+      payload: {
+        title: '数据库配置',
+        content: '生产数据库由平台组维护。',
+        visibility: 'owner',
+      },
+    });
+    messenger.sendText.mockClear();
+    const command = eventPayload({
+      eventId: 'command-search-1',
+      text: '搜索 数据库配置',
+    });
+
+    const first = await app.inject({
+      method: 'POST',
+      url: '/v1/connectors/feishu/events',
+      payload: command,
+    });
+    const duplicate = await app.inject({
+      method: 'POST',
+      url: '/v1/connectors/feishu/events',
+      payload: command,
+    });
+    const assets = await app.inject({
+      method: 'GET',
+      url: '/v1/assets',
+      headers: {
+        'x-tenant-id': 'tenant-key-1',
+        'x-user-id': 'open-id-1',
+      },
+    });
+
+    expect(first.json()).toMatchObject({
+      code: 0,
+      processed: true,
+      notificationSent: true,
+    });
+    expect(duplicate.json()).toMatchObject({
+      code: 0,
+      processed: false,
+      reason: 'duplicate_event',
+    });
+    expect(messenger.sendText).toHaveBeenCalledOnce();
+    expect(messenger.sendText).toHaveBeenCalledWith(
+      'open-id-1',
+      expect.stringContaining('[S1] 数据库配置'),
+    );
+    expect(assets.json().assets).toHaveLength(1);
+  });
+
+  it('derives asset and reminder metadata only from redacted text', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/connectors/feishu/events',
+      payload: eventPayload({
+        eventId: 'secret-reminder-event',
+        text: 'password=abcd 明天 14:30 开会讨论发布。',
+      }),
+    });
+    const assets = await app.inject({
+      method: 'GET',
+      url: '/v1/assets',
+      headers: {
+        'x-tenant-id': 'tenant-key-1',
+        'x-user-id': 'open-id-1',
+      },
+    });
+
+    expect(response.body).not.toContain('abcd');
+    expect(assets.body).not.toContain('abcd');
+    expect(response.json().reminder.title).toContain('[REDACTED:password]');
+    expect(messenger.sendText.mock.calls.flat().join('\n')).not.toContain('abcd');
   });
 });
 

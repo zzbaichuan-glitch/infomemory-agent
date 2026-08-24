@@ -4,7 +4,12 @@ import { z } from 'zod';
 
 import type { AccessContext, Reminder, ReminderStatus } from '../domain.js';
 import type { ReminderRepository } from '../repositories/reminder-repository.js';
-import { extractMeetingReminder, type MeetingReminderCandidate } from './meeting-time-extractor.js';
+import { redactSecrets } from '../security/secret-redactor.js';
+import {
+  DEFAULT_MEETING_TIME_ZONE,
+  extractMeetingReminder,
+  type MeetingReminderCandidate,
+} from './meeting-time-extractor.js';
 
 const accessContextSchema = z.object({
   tenantId: z.string().trim().min(1).max(200),
@@ -21,20 +26,50 @@ const listSchema = z.object({
   dueBefore: z.iso.datetime().optional(),
 });
 
+const scheduleSchema = z.object({
+  title: z.string().trim().min(1).max(300),
+  startsAt: z.iso.datetime(),
+  remindAt: z.iso.datetime().optional(),
+});
+
+const ALLOWED_STATUS_TRANSITIONS: Record<ReminderStatus, ReminderStatus[]> = {
+  needs_confirmation: ['scheduled', 'completed', 'cancelled'],
+  scheduled: ['completed', 'cancelled'],
+  completed: [],
+  cancelled: [],
+};
+
 export interface ReminderObservation {
   text: string;
   sourceAssetId?: string;
   sourceEventId?: string;
 }
 
+export interface ScheduleReminderCommand {
+  title: string;
+  startsAt: string;
+  remindAt?: string;
+}
+
+export class InvalidReminderTransitionError extends Error {
+  readonly code = 'invalid_reminder_transition';
+
+  constructor(from: ReminderStatus, to: ReminderStatus) {
+    super(`Reminder cannot transition from ${from} to ${to}`);
+    this.name = 'InvalidReminderTransitionError';
+  }
+}
+
 export interface ReminderServiceOptions {
   idFactory?: () => string;
   now?: () => Date;
+  timeZone?: string;
 }
 
 export class ReminderService {
   readonly #idFactory: () => string;
   readonly #now: () => Date;
+  readonly #timeZone: string;
 
   constructor(
     private readonly repository: ReminderRepository,
@@ -42,6 +77,7 @@ export class ReminderService {
   ) {
     this.#idFactory = options.idFactory ?? randomUUID;
     this.#now = options.now ?? (() => new Date());
+    this.#timeZone = options.timeZone?.trim() || DEFAULT_MEETING_TIME_ZONE;
   }
 
   async observeMessage(
@@ -57,7 +93,9 @@ export class ReminderService {
       );
       if (existing) return existing;
     }
-    const candidate = extractMeetingReminder(text, this.#now());
+    const candidate = extractMeetingReminder(text, this.#now(), {
+      timeZone: this.#timeZone,
+    });
     if (!candidate) return null;
     return this.#persistCandidate(context, candidate, observation);
   }
@@ -81,6 +119,51 @@ export class ReminderService {
     });
   }
 
+  async schedule(
+    contextInput: AccessContext,
+    input: ScheduleReminderCommand,
+  ): Promise<Reminder> {
+    const context = accessContextSchema.parse(contextInput);
+    const command = scheduleSchema.parse(input);
+    const now = this.#now();
+    const startsAt = new Date(command.startsAt);
+    if (startsAt.getTime() <= now.getTime()) {
+      throw new z.ZodError([{
+        code: 'custom',
+        path: ['startsAt'],
+        message: 'startsAt must be in the future',
+      }]);
+    }
+    const requestedRemindAt = command.remindAt
+      ? new Date(command.remindAt)
+      : new Date(Math.max(now.getTime(), startsAt.getTime() - 30 * 60_000));
+    if (requestedRemindAt.getTime() < now.getTime()) {
+      throw new z.ZodError([{
+        code: 'custom',
+        path: ['remindAt'],
+        message: 'remindAt must not be in the past',
+      }]);
+    }
+    if (requestedRemindAt.getTime() > startsAt.getTime()) {
+      throw new z.ZodError([{
+        code: 'custom',
+        path: ['remindAt'],
+        message: 'remindAt must not be after startsAt',
+      }]);
+    }
+    const safeTitle = redactSecrets(command.title).redactedText;
+    return this.repository.createReminder({
+      id: this.#idFactory(),
+      context,
+      title: safeTitle,
+      startsAt: startsAt.toISOString(),
+      remindAt: requestedRemindAt.toISOString(),
+      status: 'scheduled',
+      precision: 'exact',
+      createdAt: now.toISOString(),
+    });
+  }
+
   async listDue(contextInput: AccessContext, at = this.#now()): Promise<Reminder[]> {
     const context = accessContextSchema.parse(contextInput);
     return this.repository.listReminders(context, {
@@ -98,6 +181,11 @@ export class ReminderService {
     const context = accessContextSchema.parse(contextInput);
     const id = z.string().trim().min(1).max(200).parse(idInput);
     const nextStatus = z.enum(['scheduled', 'needs_confirmation', 'completed', 'cancelled']).parse(status);
+    const current = await this.repository.findReminder(context, id);
+    if (!current || current.status === nextStatus) return current;
+    if (!ALLOWED_STATUS_TRANSITIONS[current.status].includes(nextStatus)) {
+      throw new InvalidReminderTransitionError(current.status, nextStatus);
+    }
     return this.repository.updateReminderStatus(context, id, nextStatus);
   }
 

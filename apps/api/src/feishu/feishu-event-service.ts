@@ -1,8 +1,22 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 
-import { AssetService, ReminderService, type Reminder } from '@infomemory/core';
+import {
+  AssetService,
+  type ConnectorEventReceiptRepository,
+  ReminderService,
+  type Reminder,
+} from '@infomemory/core';
 
 import { decodeFeishuPayload, FeishuPayloadError } from './feishu-payload.js';
+import {
+  FeishuCommandService,
+  parseFeishuCommand,
+} from './feishu-command-service.js';
+import {
+  FeishuSignatureError,
+  type FeishuSignatureHeaders,
+  verifyFeishuSignature,
+} from './feishu-signature.js';
 import type { FeishuMessenger } from './feishu-client.js';
 
 type UnknownRecord = Record<string, unknown>;
@@ -19,7 +33,9 @@ export type FeishuEventResult =
       | 'unsupported_message_type'
       | 'invalid_event_payload'
       | 'duplicate_event'
-      | 'duplicate_content';
+      | 'duplicate_content'
+      | 'command_notifications_unavailable'
+      | 'command_delivery_failed';
   };
 
 export class FeishuVerificationError extends Error {
@@ -36,12 +52,18 @@ export class FeishuConfigurationError extends Error {
   }
 }
 
-export { FeishuPayloadError };
+export { FeishuPayloadError, FeishuSignatureError };
 
 export interface FeishuEventServiceOptions {
   verificationToken?: string;
   encryptKey?: string;
   messenger?: FeishuMessenger;
+  signatureNow?: () => number;
+  signatureToleranceSeconds?: number;
+  commandService?: FeishuCommandService;
+  eventReceipts?: ConnectorEventReceiptRepository;
+  now?: () => Date;
+  timeZone?: string;
 }
 
 export class FeishuEventService {
@@ -51,8 +73,20 @@ export class FeishuEventService {
     private readonly options: FeishuEventServiceOptions = {},
   ) {}
 
-  async handle(payload: unknown): Promise<FeishuEventResult> {
+  async handle(
+    payload: unknown,
+    signatureHeaders: FeishuSignatureHeaders = {},
+  ): Promise<FeishuEventResult> {
     if (!this.options.verificationToken) throw new FeishuConfigurationError();
+    if (this.options.encryptKey) {
+      verifyFeishuSignature(payload, signatureHeaders, {
+        encryptKey: this.options.encryptKey,
+        ...(this.options.signatureNow ? { now: this.options.signatureNow } : {}),
+        ...(this.options.signatureToleranceSeconds !== undefined
+          ? { toleranceSeconds: this.options.signatureToleranceSeconds }
+          : {}),
+      });
+    }
     const body = asRecord(decodeFeishuPayload(payload, this.options.encryptKey));
     if (!body) return { type: 'ack', processed: false, reason: 'invalid_event_payload' };
 
@@ -81,13 +115,27 @@ export class FeishuEventService {
     const tenantId = stringValue(header?.tenant_key);
     const sender = asRecord(event?.sender);
     const senderId = asRecord(sender?.sender_id);
-    const userId = stringValue(senderId?.open_id)
+    const openId = stringValue(senderId?.open_id);
+    const userId = openId
       ?? stringValue(senderId?.union_id)
       ?? stringValue(senderId?.user_id);
     const messageId = stringValue(message?.message_id);
     const text = parseTextContent(stringValue(message?.content));
     if (!eventId || !tenantId || !userId || !messageId || !text) {
       return { type: 'ack', processed: false, reason: 'invalid_event_payload' };
+    }
+
+    if (this.options.commandService
+      && this.options.eventReceipts
+      && parseFeishuCommand(text)) {
+      if (!this.options.messenger || !openId) {
+        return {
+          type: 'ack',
+          processed: false,
+          reason: 'command_notifications_unavailable',
+        };
+      }
+      return this.#handleCommand({ tenantId, userId }, eventId, openId, text);
     }
 
     const result = await this.assetService.ingest(
@@ -103,7 +151,11 @@ export class FeishuEventService {
 
     const reminder = await this.reminderService.observeMessage(
       { tenantId, userId },
-      { text, sourceAssetId: result.asset.id, sourceEventId: eventId },
+      {
+        text: result.asset.redactedContent,
+        sourceAssetId: result.asset.id,
+        sourceEventId: eventId,
+      },
     );
     const notificationSent = reminder && result.deduplicatedBy !== 'idempotency'
       ? await this.#notify(userId, reminder)
@@ -127,10 +179,51 @@ export class FeishuEventService {
     };
   }
 
+  async #handleCommand(
+    context: { tenantId: string; userId: string },
+    eventId: string,
+    openId: string,
+    text: string,
+  ): Promise<FeishuEventResult> {
+    const commandService = this.options.commandService;
+    const receipts = this.options.eventReceipts;
+    const messenger = this.options.messenger;
+    if (!commandService || !receipts || !messenger) {
+      return {
+        type: 'ack',
+        processed: false,
+        reason: 'command_notifications_unavailable',
+      };
+    }
+    const receivedAt = (this.options.now?.() ?? new Date()).toISOString();
+    const receipt = {
+      tenantId: context.tenantId,
+      connector: 'feishu',
+      eventId,
+      receivedAt,
+    };
+    const claim = await receipts.claimConnectorEventReceipt(receipt);
+    if (!claim.claimed) {
+      return { type: 'ack', processed: false, reason: 'duplicate_event' };
+    }
+    try {
+      const response = await commandService.execute(context, text);
+      if (!response) throw new Error('Feishu command could not be executed');
+      await messenger.sendText(openId, response);
+      return { type: 'ack', processed: true, notificationSent: true };
+    } catch {
+      await receipts.releaseConnectorEventReceipt(receipt);
+      return { type: 'ack', processed: false, reason: 'command_delivery_failed' };
+    }
+  }
+
   async #notify(userId: string, reminder: Reminder): Promise<boolean> {
     if (!this.options.messenger) return false;
     try {
-      await this.options.messenger.sendText(userId, reminderMessage(reminder));
+      await this.options.messenger.sendText(
+        userId,
+        reminderMessage(reminder, this.options.timeZone),
+      );
       return true;
     } catch {
       return false;
@@ -144,10 +237,10 @@ export class FeishuEventService {
   }
 }
 
-function reminderMessage(reminder: Reminder): string {
+function reminderMessage(reminder: Reminder, timeZone = 'Asia/Shanghai'): string {
   const startsAt = new Date(reminder.startsAt);
   const formatted = new Intl.DateTimeFormat('zh-CN', {
-    timeZone: 'Asia/Shanghai',
+    timeZone,
     year: 'numeric',
     month: 'numeric',
     day: 'numeric',

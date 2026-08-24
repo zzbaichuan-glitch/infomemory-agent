@@ -1,0 +1,44 @@
+services:
+  api:
+    build:
+      context: .
+    image: infomemory-agent:local
+    restart: unless-stopped
+    init: true
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+      DATABASE_PATH: /app/var/infomemory.sqlite
+      APP_TIMEZONE: ${APP_TIMEZONE:-Asia/Shanghai}
+      AUTH_MODE: bearer
+      AUTH_SECRET: ${AUTH_SECRET:?set AUTH_SECRET to at least 32 random characters}
+      AUTH_ISSUER: ${AUTH_ISSUER:-infomemory-agent}
+      AUTH_AUDIENCE: ${AUTH_AUDIENCE:-infomemory-api}
+      HTTP_BODY_LIMIT_BYTES: ${HTTP_BODY_LIMIT_BYTES:-4194304}
+      HTTP_REQUEST_TIMEOUT_MS: ${HTTP_REQUEST_TIMEOUT_MS:-30000}
+      HTTP_CONNECTION_TIMEOUT_MS: ${HTTP_CONNECTION_TIMEOUT_MS:-125000}
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      RATE_LIMIT_MAX_REQUESTS: ${RATE_LIMIT_MAX_REQUESTS:-120}
+      RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-60000}
+      RATE_LIMIT_MAX_KEYS: ${RATE_LIMIT_MAX_KEYS:-10000}
+      LLM_ENABLED: ${LLM_ENABLED:-false}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://llm-gw.bupt.edu.cn/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_TIMEOUT_MS: ${LLM_TIMEOUT_MS:-15000}
+      FEISHU_VERIFICATION_TOKEN: ${FEISHU_VERIFICATION_TOKEN:-}
+      FEISHU_ENCRYPT_KEY: ${FEISHU_ENCRYPT_KEY:-}
+      FEISHU_NOTIFICATIONS_ENABLED: ${FEISHU_NOTIFICATIONS_ENABLED:-false}
+      FEISHU_APP_ID: ${FEISHU_APP_ID:-}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
+      FEISHU_API_BASE_URL: ${FEISHU_API_BASE_URL:-https://open.feishu.cn}
+      FEISHU_API_TIMEOUT_MS: ${FEISHU_API_TIMEOUT_MS:-10000}
+      REMINDER_POLL_INTERVAL_MS: ${REMINDER_POLL_INTERVAL_MS:-15000}
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - infomemory-data:/app/var
+
+volumes:
+  infomemory-data:

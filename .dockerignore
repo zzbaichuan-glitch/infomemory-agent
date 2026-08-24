@@ -1,0 +1,13 @@
+.git
+.github
+.npm-cache
+node_modules
+**/dist
+coverage
+var
+.env
+.env.*
+!.env.example
+*.log
+.idea
+.vscode

@@ -24,4 +24,11 @@ describe('decodeFeishuPayload', () => {
     expect(() => decodeFeishuPayload({ encrypt: 'invalid' }))
       .toThrow(FeishuPayloadError);
   });
+
+  it('rejects plaintext downgrade when an encrypt key is configured', () => {
+    expect(() => decodeFeishuPayload({
+      type: 'url_verification',
+      challenge: 'should-not-pass',
+    }, 'configured-encrypt-key')).toThrow('encrypted payload is required');
+  });
 });

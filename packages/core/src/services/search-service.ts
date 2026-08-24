@@ -1,7 +1,9 @@
 import { z } from 'zod';
 
-import type { AccessContext, InformationAsset, SourceReference } from '../domain.js';
+import type { AccessContext, SourceReference } from '../domain.js';
 import type { AssetRepository } from '../repositories/asset-repository.js';
+import { redactSecrets } from '../security/secret-redactor.js';
+import { normalizeSearchText, searchTerms } from '../search/search-text.js';
 
 const searchSchema = z.object({
   query: z.string().trim().min(1).max(1_000),
@@ -26,35 +28,21 @@ export interface SearchResult {
   evidence: SearchEvidence[];
 }
 
-interface RankedAsset {
-  asset: InformationAsset;
-  score: number;
-}
-
 export class SearchService {
   constructor(private readonly repository: AssetRepository) {}
 
   async search(context: AccessContext, input: SearchCommand): Promise<SearchResult> {
     const command = searchSchema.parse(input);
-    const normalizedQuery = normalize(command.query);
-    const terms = queryTerms(normalizedQuery);
-    const accessibleAssets = await this.repository.list(context, { limit: 500 });
-
-    const ranked = accessibleAssets
-      .map((asset): RankedAsset => ({
-        asset,
-        score: scoreAsset(asset, normalizedQuery, terms),
-      }))
-      .filter(({ score }) => score > 0)
-      .sort((left, right) =>
-        right.score - left.score
-        || right.asset.createdAt.localeCompare(left.asset.createdAt)
-        || left.asset.id.localeCompare(right.asset.id))
-      .slice(0, command.limit);
+    const safeQuery = redactSecrets(command.query).redactedText;
+    const normalizedQuery = normalizeSearchText(safeQuery);
+    const terms = searchTerms(normalizedQuery);
+    const ranked = await this.repository.search(context, normalizedQuery, {
+      limit: command.limit,
+    });
 
     return {
       mode: 'keyword',
-      query: command.query,
+      query: safeQuery,
       evidence: ranked.map(({ asset, score }) => ({
         citationId: `asset:${asset.id}`,
         assetId: asset.id,
@@ -68,51 +56,8 @@ export class SearchService {
   }
 }
 
-function normalize(value: string): string {
-  return value.normalize('NFKC').toLocaleLowerCase('zh-CN');
-}
-
-function queryTerms(query: string): string[] {
-  const terms = new Set<string>([query]);
-  const segments = query.match(/[a-z0-9_-]+|[\p{Script=Han}]+/gu) ?? [];
-
-  for (const segment of segments) {
-    if (/^[\p{Script=Han}]+$/u.test(segment) && segment.length > 2) {
-      for (let index = 0; index < segment.length - 1; index += 1) {
-        terms.add(segment.slice(index, index + 2));
-      }
-    } else if (segment.length > 1) {
-      terms.add(segment);
-    }
-  }
-
-  return Array.from(terms).filter((term) => term.length > 1);
-}
-
-function scoreAsset(
-  asset: InformationAsset,
-  query: string,
-  terms: string[],
-): number {
-  const title = normalize(asset.title);
-  const content = normalize(asset.redactedContent);
-  let score = 0;
-
-  if (title === query) score += 120;
-  else if (title.includes(query)) score += 70;
-  if (content.includes(query)) score += 45;
-
-  for (const term of terms) {
-    if (term === query) continue;
-    if (title.includes(term)) score += 8;
-    if (content.includes(term)) score += 3;
-  }
-
-  return score;
-}
-
 function createSnippet(content: string, query: string, terms: string[]): string {
-  const normalizedContent = normalize(content);
+  const normalizedContent = normalizeSearchText(content);
   let matchIndex = normalizedContent.indexOf(query);
   if (matchIndex < 0) {
     matchIndex = terms

@@ -1,8 +1,14 @@
 export type SecretFindingType =
   | 'api_key'
   | 'bearer_token'
+  | 'basic_auth'
+  | 'cloud_access_key'
+  | 'github_token'
+  | 'jwt'
   | 'password'
-  | 'database_password';
+  | 'database_password'
+  | 'private_key'
+  | 'service_token';
 
 export interface SecretFinding {
   type: SecretFindingType;
@@ -23,12 +29,19 @@ interface Candidate {
   priority: number;
 }
 
-const API_KEY_PATTERN = /\bsk-[A-Za-z0-9_-]{20,}\b/g;
+const API_KEY_PATTERN = /\b(?:sk-(?:proj-)?[A-Za-z0-9_-]{16,}|AIza[A-Za-z0-9_-]{35}|(?:sk|rk)_live_[A-Za-z0-9]{16,})\b/g;
+const CLOUD_ACCESS_KEY_PATTERN = /\b(?:AKIA|ASIA|AIDA|AROA)[A-Z0-9]{16}\b/g;
+const GITHUB_TOKEN_PATTERN = /\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,})\b/g;
+const SERVICE_TOKEN_PATTERN = /\b(?:npm_[A-Za-z0-9]{30,}|xox[baprs]-[A-Za-z0-9-]{10,})\b/g;
+const JWT_PATTERN = /\beyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{10,}\b/g;
 const BEARER_PATTERN = /\bBearer\s+([A-Za-z0-9._~+/=-]{16,})/gi;
+const BASIC_AUTH_PATTERN = /\bBasic\s+([A-Za-z0-9+/=]{12,})/gi;
 const PASSWORD_ASSIGNMENT_PATTERN =
-  /\b(?:password|passwd|pwd|api[_-]?key|secret)\s*[:=]\s*["']?([^\s,;"']{4,})["']?/gi;
+  /(?:^|[^\p{L}\p{N}_])(?:"?(?:(?:[a-z][a-z0-9]*[_-])*(?:password|passwd|pwd|api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|app[_-]?secret|secret|token)|密码|密钥|令牌)"?)\s*[:=]\s*["']?([^\s,;"']{4,})["']?/gimu;
 const DATABASE_URL_PATTERN =
   /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|mssql):\/\/[^:\s/@]+:([^@\s/]+)@/gi;
+const PRIVATE_KEY_PATTERN =
+  /-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----[\s\S]{1,100000}?-----END (?:[A-Z0-9]+ )?PRIVATE KEY-----/g;
 
 function collectWholeMatches(
   input: string,
@@ -71,16 +84,21 @@ function collectCapturedMatches(
   return candidates;
 }
 
-function maskedPreview(type: SecretFindingType, secret: string): string {
-  const fingerprint = secret.length >= 4 ? `:…${secret.slice(-4)}` : '';
-  return `[REDACTED:${type}${fingerprint}]`;
+function maskedPreview(type: SecretFindingType): string {
+  return `[REDACTED:${type}]`;
 }
 
 export function redactSecrets(input: string): RedactionResult {
   const candidates = [
+    ...collectWholeMatches(input, PRIVATE_KEY_PATTERN, 'private_key', 0),
     ...collectCapturedMatches(input, DATABASE_URL_PATTERN, 'database_password', 0),
     ...collectWholeMatches(input, API_KEY_PATTERN, 'api_key', 1),
+    ...collectWholeMatches(input, CLOUD_ACCESS_KEY_PATTERN, 'cloud_access_key', 1),
+    ...collectWholeMatches(input, GITHUB_TOKEN_PATTERN, 'github_token', 1),
+    ...collectWholeMatches(input, SERVICE_TOKEN_PATTERN, 'service_token', 1),
+    ...collectWholeMatches(input, JWT_PATTERN, 'jwt', 1),
     ...collectCapturedMatches(input, BEARER_PATTERN, 'bearer_token', 2),
+    ...collectCapturedMatches(input, BASIC_AUTH_PATTERN, 'basic_auth', 2),
     ...collectCapturedMatches(input, PASSWORD_ASSIGNMENT_PATTERN, 'password', 3),
   ].sort((left, right) => left.start - right.start || left.priority - right.priority);
 
@@ -91,8 +109,7 @@ export function redactSecrets(input: string): RedactionResult {
   for (const candidate of candidates) {
     if (candidate.start < cursor || candidate.end <= candidate.start) continue;
 
-    const secret = input.slice(candidate.start, candidate.end);
-    const preview = maskedPreview(candidate.type, secret);
+    const preview = maskedPreview(candidate.type);
     output.push(input.slice(cursor, candidate.start), preview);
     findings.push({
       type: candidate.type,

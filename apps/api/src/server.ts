@@ -9,6 +9,7 @@ import { config as loadEnvironment } from 'dotenv';
 import { buildApp } from './app.js';
 import { loadAppConfig } from './config.js';
 import { FeishuClient, formatReminderNotification } from './feishu/feishu-client.js';
+import { createLoggerOptions } from './logging.js';
 
 loadEnvironment({ path: ['.env.local', '.env'], quiet: true });
 const config = loadAppConfig();
@@ -17,7 +18,25 @@ const llmGenerator = createLlmGenerator();
 const feishuClient = createFeishuClient();
 const app = await buildApp({
   databasePath,
-  logger: true,
+  logger: createLoggerOptions(config.nodeEnv),
+  nodeEnv: config.nodeEnv,
+  authentication: config.authMode === 'bearer'
+    ? {
+      mode: 'bearer',
+      secret: config.authSecret ?? '',
+      issuer: config.authIssuer ?? '',
+      audience: config.authAudience ?? '',
+    }
+    : { mode: 'trusted_headers', environment: config.nodeEnv },
+  timeZone: config.appTimeZone,
+  bodyLimitBytes: config.httpBodyLimitBytes,
+  requestTimeoutMs: config.httpRequestTimeoutMs,
+  connectionTimeoutMs: config.httpConnectionTimeoutMs,
+  rateLimit: config.rateLimitEnabled ? {
+    maxRequests: config.rateLimitMaxRequests,
+    windowMs: config.rateLimitWindowMs,
+    maxKeys: config.rateLimitMaxKeys,
+  } : false,
   llmEnabled: config.llmEnabled,
   ...(llmGenerator ? { llmGenerator } : {}),
   ...(config.feishuVerificationToken
@@ -25,7 +44,9 @@ const app = await buildApp({
     : {}),
   ...(config.feishuEncryptKey ? { feishuEncryptKey: config.feishuEncryptKey } : {}),
   ...(feishuClient ? { feishuMessenger: feishuClient } : {}),
-  ...(feishuClient ? { reminderNotifier: createReminderNotifier(feishuClient) } : {}),
+  ...(feishuClient
+    ? { reminderNotifier: createReminderNotifier(feishuClient, config.appTimeZone) }
+    : {}),
   reminderWorkerEnabled: Boolean(feishuClient),
   reminderPollIntervalMs: config.reminderPollIntervalMs,
 });
@@ -74,10 +95,16 @@ function createFeishuClient(): FeishuClient | undefined {
   });
 }
 
-function createReminderNotifier(client: FeishuClient): ReminderNotifier {
+function createReminderNotifier(
+  client: FeishuClient,
+  timeZone: string,
+): ReminderNotifier {
   return {
     notify: async (reminder) => {
-      await client.sendText(reminder.userId, formatReminderNotification(reminder));
+      await client.sendText(
+        reminder.userId,
+        formatReminderNotification(reminder, timeZone),
+      );
     },
   };
 }

@@ -22,7 +22,7 @@ describe('InfoMemory API', () => {
     expect(response.json()).toMatchObject({
       status: 'ok',
       service: 'infomemory-api',
-      searchMode: 'keyword',
+      searchMode: 'sqlite_fts5',
       llmEnabled: false,
     });
   });
@@ -34,6 +34,7 @@ describe('InfoMemory API', () => {
     expect(response.json()).toEqual({
       error: 'access_context_required',
       message: 'x-tenant-id and x-user-id headers are required',
+      requestId: expect.any(String),
     });
   });
 
@@ -167,6 +168,126 @@ describe('InfoMemory API', () => {
       headers: accessHeaders('tenant-a', 'bob'),
     });
     expect(hidden.json().reminders).toEqual([]);
+  });
+
+  it('scopes idempotency keys to the actor and rejects payload conflicts', async () => {
+    const alice = await app.inject({
+      method: 'POST',
+      url: '/v1/assets',
+      headers: accessHeaders('tenant-a', 'alice', { 'idempotency-key': 'shared-key' }),
+      payload: { title: 'Alice 私有资产', content: '仅 Alice 可见。', visibility: 'owner' },
+    });
+    const bob = await app.inject({
+      method: 'POST',
+      url: '/v1/assets',
+      headers: accessHeaders('tenant-a', 'bob', { 'idempotency-key': 'shared-key' }),
+      payload: { title: 'Bob 私有资产', content: '仅 Bob 可见。', visibility: 'owner' },
+    });
+    const conflict = await app.inject({
+      method: 'POST',
+      url: '/v1/assets',
+      headers: accessHeaders('tenant-a', 'alice', { 'idempotency-key': 'shared-key' }),
+      payload: { title: '不同请求', content: '不能复用相同 key。', visibility: 'owner' },
+    });
+
+    expect(alice.statusCode).toBe(201);
+    expect(bob.statusCode).toBe(201);
+    expect(bob.json().asset).toMatchObject({ ownerId: 'bob', title: 'Bob 私有资产' });
+    expect(bob.body).not.toContain('Alice 私有资产');
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json()).toMatchObject({
+      error: 'idempotency_conflict',
+      requestId: expect.any(String),
+    });
+  });
+
+  it('paginates, reads, and owner-deletes assets without weakening access control', async () => {
+    const createdIds: string[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/assets',
+        headers: accessHeaders('tenant-a', 'alice', {
+          'idempotency-key': `pagination-${index}`,
+        }),
+        payload: {
+          title: `分页资产 ${index}`,
+          content: `分页检索内容 ${index}`,
+          visibility: 'owner',
+        },
+      });
+      createdIds.push(response.json().asset.id as string);
+    }
+
+    const firstPage = await app.inject({
+      method: 'GET',
+      url: '/v1/assets?limit=2&visibility=owner',
+      headers: accessHeaders('tenant-a', 'alice'),
+    });
+    const cursor = firstPage.json().nextCursor as string;
+    const secondPage = await app.inject({
+      method: 'GET',
+      url: `/v1/assets?limit=2&cursor=${encodeURIComponent(cursor)}`,
+      headers: accessHeaders('tenant-a', 'alice'),
+    });
+    const targetId = createdIds[0] ?? '';
+    const hidden = await app.inject({
+      method: 'GET',
+      url: `/v1/assets/${targetId}`,
+      headers: accessHeaders('tenant-a', 'bob'),
+    });
+    const deleted = await app.inject({
+      method: 'DELETE',
+      url: `/v1/assets/${targetId}`,
+      headers: accessHeaders('tenant-a', 'alice'),
+    });
+    const afterDelete = await app.inject({
+      method: 'GET',
+      url: `/v1/assets/${targetId}`,
+      headers: accessHeaders('tenant-a', 'alice'),
+    });
+
+    expect(firstPage.json().assets).toHaveLength(2);
+    expect(cursor).toEqual(expect.any(String));
+    expect(secondPage.json().assets).toHaveLength(1);
+    expect(hidden.statusCode).toBe(404);
+    expect(deleted.json()).toEqual({ deleted: true, id: targetId });
+    expect(afterDelete.statusCode).toBe(404);
+  });
+
+  it('creates manual reminders and rejects reopening a terminal reminder', async () => {
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v1/reminders',
+      headers: accessHeaders('tenant-a', 'alice'),
+      payload: {
+        title: '发布会 password=abcd',
+        startsAt: '2030-08-24T06:30:00.000Z',
+        remindAt: '2030-08-24T06:00:00.000Z',
+      },
+    });
+    const reminder = created.json().reminder as { id: string; title: string };
+    const completed = await app.inject({
+      method: 'POST',
+      url: `/v1/reminders/${reminder.id}/status`,
+      headers: accessHeaders('tenant-a', 'alice'),
+      payload: { status: 'completed' },
+    });
+    const reopened = await app.inject({
+      method: 'POST',
+      url: `/v1/reminders/${reminder.id}/status`,
+      headers: accessHeaders('tenant-a', 'alice'),
+      payload: { status: 'scheduled' },
+    });
+
+    expect(created.statusCode).toBe(201);
+    expect(reminder.title).toBe('发布会 password=[REDACTED:password]');
+    expect(completed.json().reminder.status).toBe('completed');
+    expect(reopened.statusCode).toBe(409);
+    expect(reopened.json()).toMatchObject({
+      error: 'invalid_reminder_transition',
+      requestId: expect.any(String),
+    });
   });
 });
 
