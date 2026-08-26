@@ -23,7 +23,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Node.js 24
         uses: actions/setup-node@v7
@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Node.js 24
         uses: actions/setup-node@v7
@@ -62,7 +62,7 @@ jobs:
       contents: read
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Build the production image
         run: docker build --tag infomemory-agent:ci .
