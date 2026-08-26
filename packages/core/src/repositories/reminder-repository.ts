@@ -36,6 +36,8 @@ export interface ReminderRepository {
     context: AccessContext,
     options?: ReminderListOptions,
   ): Promise<Reminder[]>;
+  /** Delete a reminder only when it belongs to the requesting tenant/user. */
+  deleteReminder(context: AccessContext, id: string): Promise<boolean>;
   updateReminderStatus(
     context: AccessContext,
     id: string,

@@ -8,7 +8,9 @@ import { fileURLToPath } from 'node:url';
  * consistent when invoked from a workspace, IDE, or service manager.
  */
 export function projectRootFromModule(moduleUrl: string = import.meta.url): string {
-  return resolve(dirname(fileURLToPath(moduleUrl)), '../../..');
+  // This helper lives in `apps/api/src/config` (and is emitted to
+  // `apps/api/dist/config`), so four parent segments reach the monorepo root.
+  return resolve(dirname(fileURLToPath(moduleUrl)), '../../../..');
 }
 
 export function projectEnvironmentPaths(moduleUrl: string = import.meta.url): string[] {

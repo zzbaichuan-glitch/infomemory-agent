@@ -88,7 +88,7 @@ describe('SqliteAssetRepository migrations', () => {
         expect(asset.title).not.toContain('legacy-title-secret');
         expect(asset.redacted_content).toContain('[REDACTED:password]');
         expect(asset.redacted_content).not.toContain('legacy-content-secret');
-        expect(Number(asset.secret_finding_count)).toBeGreaterThanOrEqual(2);
+        expect(Number(asset.secret_finding_count)).toBe(2);
 
         const source = migrated.prepare(`
           SELECT source_identity, external_id, source_url

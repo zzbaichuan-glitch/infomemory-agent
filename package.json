@@ -23,6 +23,7 @@
     "token": "npm run token --workspace @infomemory/api --",
     "agent": "node scripts/zhilan.mjs",
     "acceptance": "powershell -ExecutionPolicy Bypass -File .\\scripts\\acceptance.ps1",
+    "demo": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\demo.ps1",
     "audit:dependencies": "npm audit --audit-level=high --registry=https://registry.npmjs.org"
   },
   "devDependencies": {

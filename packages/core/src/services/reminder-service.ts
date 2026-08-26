@@ -179,6 +179,12 @@ export class ReminderService {
     });
   }
 
+  async deleteReminder(contextInput: AccessContext, idInput: string): Promise<boolean> {
+    const context = accessContextSchema.parse(contextInput);
+    const id = z.string().trim().min(1).max(200).parse(idInput);
+    return this.repository.deleteReminder(context, id);
+  }
+
   async updateStatus(
     contextInput: AccessContext,
     idInput: string,

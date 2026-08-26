@@ -138,6 +138,11 @@ try {
     ownerBoundary = if ($authMode -eq 'trusted_headers') { 'verified' } else { 'skipped_for_bearer_demo' }
   } | ConvertTo-Json
 } finally {
+  if ($reminderId) {
+    try {
+      Invoke-ApiJson -Method Delete -Path "/v1/reminders/$reminderId" -RequestHeaders $headers | Out-Null
+    } catch { }
+  }
   if ($assetId) {
     try { Invoke-ApiJson -Method Delete -Path "/v1/assets/$assetId" -RequestHeaders $headers | Out-Null } catch { }
   }

@@ -137,6 +137,7 @@ npm run agent -- search 知澜 安全
 npm run agent -- ask 知澜的安全边界是什么
 npm run agent -- remind --title "项目复盘" --starts-at "2026-09-01T02:00:00.000Z"
 npm run agent -- reminders --status scheduled
+npm run agent -- reminder-delete <reminder-id>
 npm run agent -- --help
 ```
 
@@ -186,6 +187,7 @@ npm run token -- <args>
 | POST | `/v1/search` | 权限过滤的证据检索 |
 | POST | `/v1/answers` | 引用门控问答 |
 | POST/GET | `/v1/reminders` | 创建 / 查询提醒 |
+| DELETE | `/v1/reminders/:id` | 删除当前用户自己的提醒 |
 | POST | `/v1/reminders/:id/status` | 推进提醒状态 |
 | POST | `/v1/connectors/feishu/events` | 飞书回调 |
 
@@ -240,6 +242,37 @@ powershell -ExecutionPolicy Bypass -File .\scripts\acceptance.ps1
 ```
 
 也可以直接运行根脚本：`npm run acceptance`。
+
+### 一键验收演示
+
+如果希望让同事直接看到“启动服务 → 就绪检查 → 完整验收 → 自动清理”的流程，推荐运行：
+
+```powershell
+npm run demo
+```
+
+实际调用链：
+
+```text
+npm run demo
+└─ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\demo.ps1
+   ├─ npm run build
+   ├─ node apps/api/dist/server.js（临时 development + trusted_headers + :memory:）
+   ├─ GET /health/ready
+   ├─ scripts/acceptance.ps1（显式使用 demo-tenant / demo-user）
+   └─ 自动停止服务并清理演示资产、提醒
+```
+
+需要保留服务供第二个终端操作时，使用 `-KeepRunning`；脚本会打印进程号和日志位置：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\demo.ps1 -KeepRunning
+$env:INFOMEMORY_TENANT_ID = "demo-tenant"
+$env:INFOMEMORY_USER_ID = "demo-user"
+npm run agent -- health
+```
+
+演示结束后按脚本提示停止对应进程（或执行 `Stop-Process -Id <PID>`）。不传 `-KeepRunning` 时，验收完成会自动停止服务；默认使用内存数据库，不会留下业务数据。
 
 ## 生产启动
 

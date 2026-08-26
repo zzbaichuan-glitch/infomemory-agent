@@ -403,6 +403,14 @@ export class SqliteAssetRepository implements
     return rows.map((row) => this.#mapReminder(row));
   }
 
+  async deleteReminder(context: AccessContext, id: string): Promise<boolean> {
+    const result = this.#database.prepare(`
+      DELETE FROM reminders
+      WHERE id = ? AND tenant_id = ? AND user_id = ?
+    `).run(id, context.tenantId, context.userId);
+    return Number(result.changes) === 1;
+  }
+
   async updateReminderStatus(
     context: AccessContext,
     id: string,
@@ -633,8 +641,10 @@ export class SqliteAssetRepository implements
   }
 
   #migrateFtsIndex(): void {
-    // Sanitize first so no legacy title/content can enter the new index.
-    this.#migrateSensitiveMetadata(false);
+    // The schema migration runs the metadata sanitizer in v5 immediately
+    // after creating this index. Keeping sanitization in that single step
+    // avoids counting already-redacted placeholders twice during a v0/v1
+    // upgrade while the enclosing transaction keeps raw rows private.
     this.#database.exec(`
       CREATE VIRTUAL TABLE assets_fts USING fts5(
         asset_id UNINDEXED,

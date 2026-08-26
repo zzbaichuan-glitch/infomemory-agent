@@ -115,6 +115,42 @@ describe('ReminderService', () => {
     });
   });
 
+  it('deletes reminders only within the requesting tenant and user boundary', async () => {
+    const reminder = await service.schedule(context, {
+      title: '需要清理的演示提醒',
+      startsAt: '2026-08-19T04:00:00.000Z',
+    });
+
+    await expect(service.deleteReminder(
+      { tenantId: 'tenant-a', userId: 'bob' },
+      reminder.id,
+    )).resolves.toBe(false);
+    await expect(service.deleteReminder(
+      { tenantId: 'tenant-b', userId: 'alice' },
+      reminder.id,
+    )).resolves.toBe(false);
+    await expect(service.list(context)).resolves.toHaveLength(1);
+    await expect(service.deleteReminder(context, reminder.id)).resolves.toBe(true);
+    await expect(service.deleteReminder(context, reminder.id)).resolves.toBe(false);
+    await expect(service.list(context)).resolves.toEqual([]);
+  });
+
+  it('deleting a source-derived reminder permits the same event to be processed again', async () => {
+    const first = await service.observeMessage(context, {
+      text: '明天 14:30 开会讨论上线方案。',
+      sourceEventId: 'event-recreated-after-delete',
+    });
+
+    await expect(service.deleteReminder(context, first?.id ?? '')).resolves.toBe(true);
+    const recreated = await service.observeMessage(context, {
+      text: '明天 14:30 开会讨论上线方案。',
+      sourceEventId: 'event-recreated-after-delete',
+    });
+
+    expect(recreated?.id).not.toBe(first?.id);
+    await expect(service.list(context)).resolves.toHaveLength(1);
+  });
+
   it('rejects past reminders, invalid remind times, and terminal status reopening', async () => {
     await expect(service.schedule(context, {
       title: '过去的会议',

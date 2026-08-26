@@ -24,6 +24,7 @@ const HELP = `知澜命令行
   reminders [--status scheduled,needs_confirmation]
   remind --title <title> --starts-at <ISO> [--remind-at <ISO>]
   reminder-status <reminder-id> scheduled|completed|cancelled
+  reminder-delete <reminder-id>
 `;
 
 const [command = 'help', ...argumentsList] = process.argv.slice(2);
@@ -66,6 +67,9 @@ async function run(selectedCommand, values) {
       return createReminder(values);
     case 'reminder-status':
       return updateReminderStatus(values);
+    case 'reminder-delete':
+    case 'delete-reminder':
+      return deleteReminder(values);
     default:
       throw new Error(`未知命令“${selectedCommand}”。运行 npm run agent -- --help 查看帮助。`);
   }
@@ -145,6 +149,13 @@ async function updateReminderStatus(values) {
   return request(`/v1/reminders/${encodeURIComponent(id)}/status`, {
     method: 'POST',
     body: { status },
+  });
+}
+
+async function deleteReminder(values) {
+  const id = requiredPositional(values, 0, 'reminder-id');
+  return request(`/v1/reminders/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
   });
 }
 

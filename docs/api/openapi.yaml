@@ -211,6 +211,24 @@ paths:
         - { name: at, in: query, schema: { type: string, format: date-time } }
       responses:
         "200": { description: Confirmed reminders due at or before the selected time }
+  /v1/reminders/{id}:
+    delete:
+      tags: [Reminders]
+      operationId: deleteReminder
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 200 } }
+      responses:
+        "200":
+          description: Reminder deleted by its owner
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted, id]
+                properties:
+                  deleted: { type: boolean, const: true }
+                  id: { type: string }
+        "404": { $ref: "#/components/responses/NotFound" }
   /v1/reminders/{id}/status:
     post:
       tags: [Reminders]

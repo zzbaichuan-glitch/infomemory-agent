@@ -288,6 +288,27 @@ describe('InfoMemory API', () => {
       error: 'invalid_reminder_transition',
       requestId: expect.any(String),
     });
+
+    const hiddenDelete = await app.inject({
+      method: 'DELETE',
+      url: `/v1/reminders/${reminder.id}`,
+      headers: accessHeaders('tenant-a', 'bob'),
+    });
+    const deleted = await app.inject({
+      method: 'DELETE',
+      url: `/v1/reminders/${reminder.id}`,
+      headers: accessHeaders('tenant-a', 'alice'),
+    });
+    const repeatedDelete = await app.inject({
+      method: 'DELETE',
+      url: `/v1/reminders/${reminder.id}`,
+      headers: accessHeaders('tenant-a', 'alice'),
+    });
+
+    expect(hiddenDelete.statusCode).toBe(404);
+    expect(deleted.statusCode).toBe(200);
+    expect(deleted.json()).toEqual({ deleted: true, id: reminder.id });
+    expect(repeatedDelete.statusCode).toBe(404);
   });
 });
 

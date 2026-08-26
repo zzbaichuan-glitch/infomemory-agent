@@ -69,6 +69,22 @@ export function registerReminderRoutes(
     };
   });
 
+  app.delete('/reminders/:id', async (request, reply) => {
+    const params = z.object({ id: z.string().trim().min(1).max(200) }).parse(request.params);
+    const deleted = await reminderService.deleteReminder(
+      requireAccessContext(request),
+      params.id,
+    );
+    if (!deleted) {
+      return reply.code(404).send({
+        error: 'reminder_not_found',
+        message: 'Reminder was not found in the current access context',
+        requestId: request.id,
+      });
+    }
+    return { deleted: true, id: params.id };
+  });
+
   app.post('/reminders/:id/status', async (request, reply) => {
     const params = z.object({ id: z.string().trim().min(1).max(200) }).parse(request.params);
     const body = statusSchema.parse(request.body);
