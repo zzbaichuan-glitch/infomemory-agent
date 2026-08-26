@@ -244,6 +244,7 @@ try {
   if ($KeepRunning) {
     $leaveServerRunning = $true
     Write-Host "验收通过。服务保持运行，供第二终端演示 CLI：$baseUrl"
+    Write-Host "Web 工作台：$baseUrl/app/"
     Write-Host "停止命令：Stop-Process -Id $($server.Id)；日志：$stdoutLog"
   }
 }

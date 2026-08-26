@@ -59,9 +59,24 @@ const environmentSchema = z.object({
   FEISHU_APP_SECRET: optionalString,
   FEISHU_API_BASE_URL: z.url().default('https://open.feishu.cn'),
   FEISHU_API_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).default(10_000),
+  FEISHU_OAUTH_ENABLED: booleanValue.default(false),
+  FEISHU_OAUTH_REDIRECT_URI: optionalString,
+  FEISHU_OAUTH_AUTHORIZATION_BASE_URL: z.url().default('https://accounts.feishu.cn'),
+  FEISHU_OAUTH_TOKEN_URL: z.url().default('https://accounts.feishu.cn/oauth/v3/token'),
+  FEISHU_OAUTH_SCOPES: optionalString,
+  FEISHU_TOKEN_ENCRYPTION_KEY: optionalString,
+  FEISHU_OAUTH_STATE_TTL_MS: z.coerce.number().int().min(60_000).max(3_600_000).default(600_000),
   FEISHU_ENCRYPT_KEY: optionalString,
   FEISHU_NOTIFICATIONS_ENABLED: booleanValue.default(false),
   REMINDER_POLL_INTERVAL_MS: z.coerce.number().int().min(1_000).max(3_600_000).default(15_000),
+  CONNECTOR_PROCESSING_MODE: z.enum(['sync', 'async']).optional(),
+  CONNECTOR_WORKER_ENABLED: booleanValue.optional(),
+  CONNECTOR_WORKER_INTERVAL_MS: z.coerce.number().int().min(250).max(3_600_000).default(5_000),
+  CONNECTOR_WORKER_BATCH_SIZE: z.coerce.number().int().min(1).max(200).default(25),
+  CONNECTOR_WORKER_LEASE_MS: z.coerce.number().int().min(1_000).max(86_400_000).default(300_000),
+  CONNECTOR_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(100).default(8),
+  CONNECTOR_BACKOFF_BASE_MS: z.coerce.number().int().min(1).max(86_400_000).default(1_000),
+  CONNECTOR_BACKOFF_MAX_MS: z.coerce.number().int().min(1).max(7 * 86_400_000).default(300_000),
 }).superRefine((value, context) => {
   if (value.NODE_ENV === 'production' && value.AUTH_MODE === 'trusted_headers') {
     context.addIssue({
@@ -147,6 +162,108 @@ const environmentSchema = z.object({
       });
     }
   }
+  // Any explicitly configured Feishu ingress/client (except an OAuth-only
+  // installation flow) must have the webhook verification token available at
+  // startup. Without this guard the process starts successfully but every
+  // webhook request fails later in FeishuEventService.prepare/handle.
+  const oauthOnly = value.FEISHU_OAUTH_ENABLED
+    && !value.FEISHU_NOTIFICATIONS_ENABLED
+    && value.CONNECTOR_PROCESSING_MODE !== 'async'
+    && !value.FEISHU_ENCRYPT_KEY;
+  const feishuWebhookConfigured = Boolean(
+    value.FEISHU_APP_ID
+      || value.FEISHU_APP_SECRET
+      || value.FEISHU_NOTIFICATIONS_ENABLED
+      || value.CONNECTOR_PROCESSING_MODE === 'async'
+      || value.FEISHU_ENCRYPT_KEY,
+  );
+  if (feishuWebhookConfigured && !oauthOnly && !value.FEISHU_VERIFICATION_TOKEN) {
+    context.addIssue({
+      code: 'custom',
+      path: ['FEISHU_VERIFICATION_TOKEN'],
+      message: 'FEISHU_VERIFICATION_TOKEN is required when Feishu webhook ingress is configured',
+    });
+  }
+  if (value.FEISHU_OAUTH_ENABLED) {
+    if (!value.FEISHU_APP_ID) {
+      context.addIssue({
+        code: 'custom',
+        path: ['FEISHU_APP_ID'],
+        message: 'FEISHU_APP_ID is required when FEISHU_OAUTH_ENABLED=true',
+      });
+    }
+    if (!value.FEISHU_APP_SECRET) {
+      context.addIssue({
+        code: 'custom',
+        path: ['FEISHU_APP_SECRET'],
+        message: 'FEISHU_APP_SECRET is required when FEISHU_OAUTH_ENABLED=true',
+      });
+    }
+    if (!value.FEISHU_OAUTH_REDIRECT_URI) {
+      context.addIssue({
+        code: 'custom',
+        path: ['FEISHU_OAUTH_REDIRECT_URI'],
+        message: 'FEISHU_OAUTH_REDIRECT_URI is required when FEISHU_OAUTH_ENABLED=true',
+      });
+    } else {
+      try {
+        const redirect = new URL(value.FEISHU_OAUTH_REDIRECT_URI);
+        if (!['http:', 'https:'].includes(redirect.protocol)
+          || redirect.username || redirect.password || redirect.hash
+          || (value.NODE_ENV === 'production' && redirect.protocol !== 'https:')) {
+          context.addIssue({
+            code: 'custom',
+            path: ['FEISHU_OAUTH_REDIRECT_URI'],
+            message: 'FEISHU_OAUTH_REDIRECT_URI must be a safe HTTPS URL in production',
+          });
+        }
+      } catch {
+        context.addIssue({
+          code: 'custom',
+          path: ['FEISHU_OAUTH_REDIRECT_URI'],
+          message: 'FEISHU_OAUTH_REDIRECT_URI must be a valid URL',
+        });
+      }
+    }
+    for (const [path, rawUrl] of [
+      ['FEISHU_OAUTH_AUTHORIZATION_BASE_URL', value.FEISHU_OAUTH_AUTHORIZATION_BASE_URL],
+      ['FEISHU_OAUTH_TOKEN_URL', value.FEISHU_OAUTH_TOKEN_URL],
+    ] as const) {
+      try {
+        const parsedUrl = new URL(rawUrl);
+        if (!['http:', 'https:'].includes(parsedUrl.protocol)
+          || parsedUrl.username || parsedUrl.password || parsedUrl.hash
+          || (value.NODE_ENV === 'production' && parsedUrl.protocol !== 'https:')) {
+          context.addIssue({
+            code: 'custom',
+            path: [path],
+            message: `${path} must be a safe HTTPS URL in production`,
+          });
+        }
+      } catch {
+        context.addIssue({
+          code: 'custom',
+          path: [path],
+          message: `${path} must be a valid URL`,
+        });
+      }
+    }
+    if (!value.FEISHU_TOKEN_ENCRYPTION_KEY
+      || Buffer.byteLength(value.FEISHU_TOKEN_ENCRYPTION_KEY, 'utf8') < 32) {
+      context.addIssue({
+        code: 'custom',
+        path: ['FEISHU_TOKEN_ENCRYPTION_KEY'],
+        message: 'FEISHU_TOKEN_ENCRYPTION_KEY must contain at least 32 bytes when OAuth is enabled',
+      });
+    }
+  }
+  if (value.CONNECTOR_BACKOFF_MAX_MS < value.CONNECTOR_BACKOFF_BASE_MS) {
+    context.addIssue({
+      code: 'custom',
+      path: ['CONNECTOR_BACKOFF_MAX_MS'],
+      message: 'CONNECTOR_BACKOFF_MAX_MS must be greater than or equal to CONNECTOR_BACKOFF_BASE_MS',
+    });
+  }
 });
 
 export interface AppConfig {
@@ -176,9 +293,24 @@ export interface AppConfig {
   feishuAppSecret?: string;
   feishuApiBaseUrl: string;
   feishuApiTimeoutMs: number;
+  feishuOAuthEnabled: boolean;
+  feishuOAuthRedirectUri?: string;
+  feishuOAuthAuthorizationBaseUrl: string;
+  feishuOAuthTokenUrl: string;
+  feishuOAuthScopes: string[];
+  feishuTokenEncryptionKey?: string;
+  feishuOAuthStateTtlMs: number;
   feishuEncryptKey?: string;
   feishuNotificationsEnabled: boolean;
   reminderPollIntervalMs: number;
+  connectorProcessingMode: 'sync' | 'async';
+  connectorWorkerEnabled: boolean;
+  connectorWorkerIntervalMs: number;
+  connectorWorkerBatchSize: number;
+  connectorWorkerLeaseMs: number;
+  connectorMaxAttempts: number;
+  connectorBackoffBaseMs: number;
+  connectorBackoffMaxMs: number;
 }
 
 export function loadAppConfig(environment: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -214,9 +346,29 @@ export function loadAppConfig(environment: NodeJS.ProcessEnv = process.env): App
       : {}),
     feishuApiBaseUrl: parsed.FEISHU_API_BASE_URL,
     feishuApiTimeoutMs: parsed.FEISHU_API_TIMEOUT_MS,
+    feishuOAuthEnabled: parsed.FEISHU_OAUTH_ENABLED,
+    feishuOAuthStateTtlMs: parsed.FEISHU_OAUTH_STATE_TTL_MS,
+    feishuOAuthAuthorizationBaseUrl: parsed.FEISHU_OAUTH_AUTHORIZATION_BASE_URL,
+    feishuOAuthTokenUrl: parsed.FEISHU_OAUTH_TOKEN_URL,
+    feishuOAuthScopes: parseScopes(parsed.FEISHU_OAUTH_SCOPES),
     feishuNotificationsEnabled: parsed.FEISHU_NOTIFICATIONS_ENABLED,
     reminderPollIntervalMs: parsed.REMINDER_POLL_INTERVAL_MS,
+    connectorProcessingMode: parsed.CONNECTOR_PROCESSING_MODE
+      ?? (parsed.NODE_ENV === 'production' ? 'async' : 'sync'),
+    connectorWorkerEnabled: parsed.CONNECTOR_WORKER_ENABLED
+      ?? (parsed.CONNECTOR_PROCESSING_MODE === 'async'
+        || (parsed.CONNECTOR_PROCESSING_MODE === undefined && parsed.NODE_ENV === 'production')),
+    connectorWorkerIntervalMs: parsed.CONNECTOR_WORKER_INTERVAL_MS,
+    connectorWorkerBatchSize: parsed.CONNECTOR_WORKER_BATCH_SIZE,
+    connectorWorkerLeaseMs: parsed.CONNECTOR_WORKER_LEASE_MS,
+    connectorMaxAttempts: parsed.CONNECTOR_MAX_ATTEMPTS,
+    connectorBackoffBaseMs: parsed.CONNECTOR_BACKOFF_BASE_MS,
+    connectorBackoffMaxMs: parsed.CONNECTOR_BACKOFF_MAX_MS,
     ...(parsed.FEISHU_ENCRYPT_KEY ? { feishuEncryptKey: parsed.FEISHU_ENCRYPT_KEY } : {}),
+    ...(parsed.FEISHU_OAUTH_REDIRECT_URI
+      ? { feishuOAuthRedirectUri: parsed.FEISHU_OAUTH_REDIRECT_URI } : {}),
+    ...(parsed.FEISHU_TOKEN_ENCRYPTION_KEY
+      ? { feishuTokenEncryptionKey: parsed.FEISHU_TOKEN_ENCRYPTION_KEY } : {}),
   };
 }
 
@@ -227,4 +379,9 @@ function isSupportedTimeZone(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+function parseScopes(value: string | undefined): string[] {
+  if (!value) return [];
+  return [...new Set(value.split(/[\s,]+/u).map((item) => item.trim()).filter(Boolean))].sort();
 }

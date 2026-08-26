@@ -54,4 +54,40 @@ describe('ReminderNotificationWorker', () => {
     expect(notify).toHaveBeenCalledTimes(2);
     expect(errors).toHaveBeenCalledOnce();
   });
+
+  it('drains an active notification before shutdown completes', async () => {
+    await repository.createReminder({ ...dueReminder, id: 'reminder-drain' });
+    const started = deferred();
+    const release = deferred();
+    const worker = new ReminderNotificationWorker(repository, {
+      notify: async () => {
+        started.resolve();
+        await release.promise;
+      },
+    }, {
+      now: () => new Date('2026-08-20T06:01:00.000Z'),
+      intervalMs: 60_000,
+    });
+
+    const tick = worker.tick();
+    await started.promise;
+    const drained = worker.stopAndDrain();
+    let complete = false;
+    void drained.then(() => { complete = true; });
+    await Promise.resolve();
+    expect(complete).toBe(false);
+
+    release.resolve();
+    await expect(drained).resolves.toBeUndefined();
+    await expect(tick).resolves.toBe(1);
+  });
 });
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve: (() => void) | undefined;
+  const promise = new Promise<void>((complete) => { resolve = complete; });
+  return {
+    promise,
+    resolve: () => resolve?.(),
+  };
+}

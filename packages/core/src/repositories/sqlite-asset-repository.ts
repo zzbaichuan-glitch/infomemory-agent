@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import type {
   AccessContext,
@@ -29,6 +29,36 @@ import type {
   ReleaseConnectorEventReceiptInput,
 } from './connector-event-repository.js';
 import type {
+  FeishuInstallation,
+  FeishuInstallationRepository,
+  FeishuOAuthState,
+  PersistFeishuInstallationInput,
+  PersistFeishuOAuthStateInput,
+  RotateFeishuInstallationTokensInput,
+} from './feishu-installation-repository.js';
+import { FeishuOAuthStateConflictError } from './feishu-installation-repository.js';
+import {
+  connectorQueueId,
+  nextConnectorRetryAt,
+  sanitizeQueueError,
+  serializeConnectorPayload,
+  type ConnectorInboxRecord,
+  type ConnectorInboxStatus,
+  type ConnectorOutboxRecord,
+  type ConnectorOutboxStatus,
+  type ConnectorQueueClaimOptions,
+  type ConnectorQueueFailureInput,
+  type ConnectorQueueFailureResult,
+  type ConnectorQueueRepository,
+  type ConnectorQueueStats,
+  type ConnectorQueueStatusCounts,
+  type CompleteConnectorInboxInput,
+  type EnqueueConnectorInboxInput,
+  type EnqueueConnectorInboxResult,
+  type EnqueueConnectorOutboxResult,
+  type PersistConnectorOutboxInput,
+} from './connector-queue-repository.js';
+import type {
   PersistReminderInput,
   ReminderDeliveryRepository,
   ReminderListOptions,
@@ -47,13 +77,15 @@ import {
 } from '../security/metadata-sanitizer.js';
 
 type Row = Record<string, unknown>;
-const CURRENT_SCHEMA_VERSION = 5;
+const CURRENT_SCHEMA_VERSION = 8;
 
 export class SqliteAssetRepository implements
   AssetRepository,
   ReminderRepository,
   ReminderDeliveryRepository,
-  ConnectorEventReceiptRepository {
+  ConnectorEventReceiptRepository,
+  ConnectorQueueRepository,
+  FeishuInstallationRepository {
   readonly #database: DatabaseSync;
 
   constructor(path: string) {
@@ -322,6 +354,203 @@ export class SqliteAssetRepository implements
     return Number(result.changes) === 1;
   }
 
+  async createFeishuOAuthState(input: PersistFeishuOAuthStateInput): Promise<void> {
+    // Keep this table bounded during normal operation.  Cleanup is best
+    // effort; it is intentionally separate from state validation below.
+    this.#database.prepare(`
+      DELETE FROM feishu_oauth_states
+      WHERE expires_at <= ? OR consumed_at IS NOT NULL
+    `).run(input.createdAt);
+    try {
+      this.#database.prepare(`
+        INSERT INTO feishu_oauth_states (
+          state_hash, app_id, redirect_uri, tenant_id, user_id, return_to,
+          encrypted_code_verifier, created_at, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        input.stateHash,
+        input.appId,
+        input.redirectUri,
+        input.tenantId ?? null,
+        input.userId ?? null,
+        input.returnTo ?? null,
+        input.encryptedCodeVerifier ?? null,
+        input.createdAt,
+        input.expiresAt,
+      );
+    } catch (error) {
+      if (String(error).includes('UNIQUE constraint failed')) {
+        throw new FeishuOAuthStateConflictError();
+      }
+      throw error;
+    }
+  }
+
+  async consumeFeishuOAuthState(
+    stateHash: string,
+    now: string,
+  ): Promise<FeishuOAuthState | null> {
+    this.#database.exec('BEGIN IMMEDIATE;');
+    try {
+      const row = this.#database.prepare(`
+        SELECT state_hash, app_id, redirect_uri, tenant_id, user_id,
+               return_to, encrypted_code_verifier, created_at, expires_at
+        FROM feishu_oauth_states
+        WHERE state_hash = ?
+          AND consumed_at IS NULL
+          AND expires_at > ?
+        LIMIT 1
+      `).get(stateHash, now) as Row | undefined;
+      if (!row) {
+        this.#database.exec('COMMIT;');
+        return null;
+      }
+      const result = this.#database.prepare(`
+        UPDATE feishu_oauth_states
+        SET consumed_at = ?
+        WHERE state_hash = ?
+          AND consumed_at IS NULL
+          AND expires_at > ?
+      `).run(now, stateHash, now);
+      if (Number(result.changes) !== 1) {
+        this.#database.exec('COMMIT;');
+        return null;
+      }
+      this.#database.exec('COMMIT;');
+      return this.#mapFeishuOAuthState({ ...row, consumed_at: now });
+    } catch (error) {
+      this.#database.exec('ROLLBACK;');
+      throw error;
+    }
+  }
+
+  async upsertFeishuInstallation(
+    input: PersistFeishuInstallationInput,
+  ): Promise<FeishuInstallation> {
+    const scopes = uniqueSortedStrings(input.scopes);
+    this.#database.prepare(`
+      INSERT INTO feishu_installations (
+        tenant_id, app_id, tenant_name, encrypted_access_token,
+        encrypted_refresh_token, access_token_expires_at,
+        refresh_token_expires_at, scopes_json, open_id, union_id,
+        installed_by_user_id, status, created_at, updated_at, revoked_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NULL)
+      ON CONFLICT (tenant_id, app_id) DO UPDATE SET
+        tenant_name = excluded.tenant_name,
+        encrypted_access_token = excluded.encrypted_access_token,
+        encrypted_refresh_token = COALESCE(
+          excluded.encrypted_refresh_token,
+          feishu_installations.encrypted_refresh_token
+        ),
+        access_token_expires_at = excluded.access_token_expires_at,
+        refresh_token_expires_at = COALESCE(
+          excluded.refresh_token_expires_at,
+          feishu_installations.refresh_token_expires_at
+        ),
+        scopes_json = excluded.scopes_json,
+        open_id = excluded.open_id,
+        union_id = excluded.union_id,
+        installed_by_user_id = excluded.installed_by_user_id,
+        status = 'active',
+        updated_at = excluded.updated_at,
+        revoked_at = NULL
+    `).run(
+      input.tenantId,
+      input.appId,
+      input.tenantName ?? null,
+      input.encryptedAccessToken,
+      input.encryptedRefreshToken ?? null,
+      input.accessTokenExpiresAt ?? null,
+      input.refreshTokenExpiresAt ?? null,
+      JSON.stringify(scopes),
+      input.openId ?? null,
+      input.unionId ?? null,
+      input.installedByUserId ?? null,
+      input.installedAt,
+      input.installedAt,
+    );
+    const installation = await this.findFeishuInstallation(input.tenantId, input.appId);
+    if (!installation) throw new Error('Feishu installation was not persisted');
+    return installation;
+  }
+
+  async rotateFeishuInstallationTokens(
+    input: RotateFeishuInstallationTokensInput,
+  ): Promise<boolean> {
+    const result = this.#database.prepare(`
+      UPDATE feishu_installations
+      SET encrypted_access_token = ?,
+          encrypted_refresh_token = COALESCE(?, encrypted_refresh_token),
+          access_token_expires_at = COALESCE(?, access_token_expires_at),
+          refresh_token_expires_at = COALESCE(?, refresh_token_expires_at),
+          scopes_json = COALESCE(?, scopes_json),
+          updated_at = ?,
+          status = 'active',
+          revoked_at = NULL
+      WHERE tenant_id = ?
+        AND app_id = ?
+        AND status = 'active'
+        AND updated_at = ?
+        AND (
+          (? IS NULL AND encrypted_refresh_token IS NULL)
+          OR encrypted_refresh_token = ?
+        )
+    `).run(
+      input.encryptedAccessToken,
+      input.encryptedRefreshToken ?? null,
+      input.accessTokenExpiresAt ?? null,
+      input.refreshTokenExpiresAt ?? null,
+      input.scopes && input.scopes.length > 0
+        ? JSON.stringify(uniqueSortedStrings(input.scopes))
+        : null,
+      input.updatedAt,
+      input.tenantId,
+      input.appId,
+      input.expectedUpdatedAt,
+      input.expectedEncryptedRefreshToken ?? null,
+      input.expectedEncryptedRefreshToken ?? null,
+    );
+    return Number(result.changes) === 1;
+  }
+
+  async findFeishuInstallation(
+    tenantId: string,
+    appId?: string,
+  ): Promise<FeishuInstallation | null> {
+    const row = appId
+      ? this.#database.prepare(`
+        SELECT * FROM feishu_installations
+        WHERE tenant_id = ? AND app_id = ?
+        LIMIT 1
+      `).get(tenantId, appId) as Row | undefined
+      : this.#database.prepare(`
+        SELECT * FROM feishu_installations
+        WHERE tenant_id = ?
+        ORDER BY updated_at DESC, app_id ASC
+        LIMIT 1
+      `).get(tenantId) as Row | undefined;
+    return row ? this.#mapFeishuInstallation(row) : null;
+  }
+
+  async revokeFeishuInstallation(
+    tenantId: string,
+    appId: string,
+    revokedAt: string,
+  ): Promise<boolean> {
+    const result = this.#database.prepare(`
+      UPDATE feishu_installations
+      SET status = 'revoked',
+          encrypted_access_token = '',
+          encrypted_refresh_token = NULL,
+          access_token_expires_at = NULL,
+          refresh_token_expires_at = NULL,
+          revoked_at = ?,
+          updated_at = ?
+      WHERE tenant_id = ? AND app_id = ? AND status = 'active'
+    `).run(revokedAt, revokedAt, tenantId, appId);
+    return Number(result.changes) === 1;
+  }
+
   async createReminder(input: PersistReminderInput): Promise<Reminder> {
     try {
       this.#database.prepare(`
@@ -494,6 +723,414 @@ export class SqliteAssetRepository implements
     return Number(result.changes) === 1;
   }
 
+  async enqueueConnectorInbox(
+    input: EnqueueConnectorInboxInput,
+  ): Promise<EnqueueConnectorInboxResult> {
+    const serialized = serializeConnectorPayload(input.payload);
+    if (input.payloadHash && input.payloadHash !== serialized.hash) {
+      throw new Error('Connector payload hash does not match the sanitized payload');
+    }
+    const receivedAt = normalizeQueueTimestamp(input.receivedAt ?? new Date().toISOString(), 'receivedAt');
+    const id = input.id ?? connectorQueueId('inbox');
+    this.#assertQueueIdentity(input.tenantId, input.connector, input.eventId);
+    this.#assertQueueTimestamp(receivedAt, 'receivedAt');
+    this.#assertQueueId(id, 'inbox id');
+    this.#database.exec('BEGIN IMMEDIATE;');
+    try {
+      const existing = this.#database.prepare(`
+        SELECT * FROM connector_inbox
+        WHERE tenant_id = ? AND connector = ? AND event_id = ?
+        LIMIT 1
+      `).get(input.tenantId, input.connector, input.eventId) as Row | undefined;
+      if (existing) {
+        const record = this.#mapConnectorInbox(existing);
+        this.#database.exec('COMMIT;');
+        return {
+          id: record.id,
+          created: false,
+          duplicate: record.payloadHash === serialized.hash,
+          conflict: record.payloadHash !== serialized.hash,
+          status: record.status,
+          record,
+        };
+      }
+      this.#database.prepare(`
+        INSERT INTO connector_inbox (
+          id, tenant_id, connector, event_id, payload_json, payload_hash,
+          status, attempts, available_at, claimed_at, claim_token,
+          lease_expires_at, last_error, processed_at, dead_lettered_at,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)
+      `).run(
+        id,
+        input.tenantId,
+        input.connector,
+        input.eventId,
+        serialized.json,
+        serialized.hash,
+        receivedAt,
+        receivedAt,
+        receivedAt,
+      );
+      const row = this.#database.prepare('SELECT * FROM connector_inbox WHERE id = ?').get(id) as Row | undefined;
+      if (!row) throw new Error('Connector inbox row was not persisted');
+      const record = this.#mapConnectorInbox(row);
+      this.#database.exec('COMMIT;');
+      return { id, created: true, duplicate: false, conflict: false, status: record.status, record };
+    } catch (error) {
+      this.#database.exec('ROLLBACK;');
+      // A concurrent writer may have won the unique race. Return its row as a
+      // normal idempotent result instead of leaking SQLite implementation errors.
+      if (String(error).includes('UNIQUE constraint failed')) {
+        const existing = this.#database.prepare(`
+          SELECT * FROM connector_inbox
+          WHERE tenant_id = ? AND connector = ? AND event_id = ?
+          LIMIT 1
+        `).get(input.tenantId, input.connector, input.eventId) as Row | undefined;
+        if (existing) {
+          const record = this.#mapConnectorInbox(existing);
+          return {
+            id: record.id,
+            created: false,
+            duplicate: record.payloadHash === serialized.hash,
+            conflict: record.payloadHash !== serialized.hash,
+            status: record.status,
+            record,
+          };
+        }
+      }
+      throw error;
+    }
+  }
+
+  async claimConnectorInbox(
+    options: ConnectorQueueClaimOptions = {},
+  ): Promise<ConnectorInboxRecord[]> {
+    const now = normalizeQueueTimestamp(options.now ?? new Date().toISOString(), 'now');
+    this.#assertQueueTimestamp(now, 'now');
+    const limit = boundedQueueInteger(options.limit, 1, 200, 25);
+    const leaseMs = boundedQueueInteger(options.leaseMs, 1_000, 86_400_000, 300_000);
+    const leaseExpiresAt = queueTimeAfter(now, leaseMs);
+    this.#database.exec('BEGIN IMMEDIATE;');
+    try {
+      const rows = this.#database.prepare(`
+        SELECT * FROM connector_inbox
+        WHERE available_at <= ?
+          AND (
+            status IN ('queued', 'retrying')
+            OR (status = 'processing' AND lease_expires_at <= ?)
+          )
+        ORDER BY available_at ASC, created_at ASC, id ASC
+        LIMIT ?
+      `).all(now, now, limit) as Row[];
+      const claimed: ConnectorInboxRecord[] = [];
+      for (const row of rows) {
+        const claimToken = randomUUID();
+        const result = this.#database.prepare(`
+          UPDATE connector_inbox
+          SET status = 'processing', attempts = attempts + 1,
+              claimed_at = ?, claim_token = ?, lease_expires_at = ?, updated_at = ?
+          WHERE id = ?
+            AND available_at <= ?
+            AND (
+              status IN ('queued', 'retrying')
+              OR (status = 'processing' AND lease_expires_at <= ?)
+            )
+        `).run(now, claimToken, leaseExpiresAt, now, String(row.id), now, now);
+        if (Number(result.changes) !== 1) continue;
+        const claimedRow = this.#database.prepare('SELECT * FROM connector_inbox WHERE id = ?').get(String(row.id)) as Row | undefined;
+        if (claimedRow) claimed.push(this.#mapConnectorInbox(claimedRow));
+      }
+      this.#database.exec('COMMIT;');
+      return claimed;
+    } catch (error) {
+      this.#database.exec('ROLLBACK;');
+      throw error;
+    }
+  }
+
+  async completeConnectorInbox(input: CompleteConnectorInboxInput): Promise<boolean> {
+    const processedAt = normalizeQueueTimestamp(input.processedAt ?? new Date().toISOString(), 'processedAt');
+    this.#assertQueueId(input.id, 'inbox id');
+    this.#assertQueueId(input.claimToken, 'inbox claim token');
+    this.#assertQueueTimestamp(processedAt, 'processedAt');
+    this.#database.exec('BEGIN IMMEDIATE;');
+    try {
+      const current = this.#database.prepare(`
+        SELECT tenant_id FROM connector_inbox
+        WHERE id = ? AND status = 'processing' AND claim_token = ?
+        LIMIT 1
+      `).get(input.id, input.claimToken) as Row | undefined;
+      if (!current) {
+        this.#database.exec('COMMIT;');
+        return false;
+      }
+      for (const outbox of input.outbox ?? []) {
+        if (outbox.tenantId !== String(current.tenant_id)) {
+          throw new Error('Connector outbox tenant must match its inbox tenant');
+        }
+        if (outbox.sourceInboxId && outbox.sourceInboxId !== input.id) {
+          throw new Error('Connector outbox source inbox must match the completing inbox');
+        }
+        this.#insertConnectorOutbox(
+          outbox.sourceInboxId ? outbox : { ...outbox, sourceInboxId: input.id },
+          outbox.availableAt ?? processedAt,
+        );
+      }
+      const result = this.#database.prepare(`
+        UPDATE connector_inbox
+        SET status = 'completed', processed_at = ?, claimed_at = NULL,
+            claim_token = NULL, lease_expires_at = NULL, updated_at = ?
+        WHERE id = ? AND status = 'processing' AND claim_token = ?
+      `).run(processedAt, processedAt, input.id, input.claimToken);
+      this.#database.exec('COMMIT;');
+      return Number(result.changes) === 1;
+    } catch (error) {
+      this.#database.exec('ROLLBACK;');
+      throw error;
+    }
+  }
+
+  async failConnectorInbox(input: ConnectorQueueFailureInput): Promise<ConnectorQueueFailureResult> {
+    return this.#failConnectorQueueRow('connector_inbox', input);
+  }
+
+  async retryConnectorInbox(id: string, availableAt = new Date().toISOString(), tenantId?: string): Promise<boolean> {
+    availableAt = normalizeQueueTimestamp(availableAt, 'availableAt');
+    this.#assertQueueId(id, 'inbox id');
+    this.#assertQueueTimestamp(availableAt, 'availableAt');
+    const tenantClause = tenantId ? ' AND tenant_id = ?' : '';
+    const result = this.#database.prepare(`
+      UPDATE connector_inbox
+      SET status = 'queued', attempts = 0, available_at = ?,
+          claimed_at = NULL, claim_token = NULL, lease_expires_at = NULL,
+          last_error = NULL, dead_lettered_at = NULL, updated_at = ?
+      WHERE id = ? AND status IN ('retrying', 'dead_letter')${tenantClause}
+    `).run(...(tenantId ? [availableAt, availableAt, id, tenantId] : [availableAt, availableAt, id]));
+    return Number(result.changes) === 1;
+  }
+
+  async cancelConnectorInbox(id: string, cancelledAt = new Date().toISOString(), tenantId?: string): Promise<boolean> {
+    cancelledAt = normalizeQueueTimestamp(cancelledAt, 'cancelledAt');
+    this.#assertQueueId(id, 'inbox id');
+    this.#assertQueueTimestamp(cancelledAt, 'cancelledAt');
+    const tenantClause = tenantId ? ' AND tenant_id = ?' : '';
+    const result = this.#database.prepare(`
+      UPDATE connector_inbox
+      SET status = 'dead_letter', available_at = ?,
+          claimed_at = NULL, claim_token = NULL, lease_expires_at = NULL,
+          last_error = 'cancelled_by_operator', dead_lettered_at = ?, updated_at = ?
+      WHERE id = ? AND status IN ('queued', 'retrying')${tenantClause}
+    `).run(...(tenantId
+      ? [cancelledAt, cancelledAt, cancelledAt, id, tenantId]
+      : [cancelledAt, cancelledAt, cancelledAt, id]));
+    return Number(result.changes) === 1;
+  }
+
+  async enqueueConnectorOutbox(
+    input: PersistConnectorOutboxInput,
+  ): Promise<EnqueueConnectorOutboxResult> {
+    this.#assertQueueIdentity(input.tenantId, input.connector, input.dedupeKey);
+    const serialized = serializeConnectorPayload(input.payload);
+    const availableAt = normalizeQueueTimestamp(input.availableAt ?? new Date().toISOString(), 'availableAt');
+    this.#assertQueueTimestamp(availableAt, 'availableAt');
+    this.#assertQueueId(input.id ?? '', 'outbox id', input.id === undefined);
+    this.#assertQueueDestination(input.destination);
+    this.#database.exec('BEGIN IMMEDIATE;');
+    try {
+      const existing = this.#database.prepare(`
+        SELECT * FROM connector_outbox
+        WHERE tenant_id = ? AND connector = ? AND dedupe_key = ?
+        LIMIT 1
+      `).get(input.tenantId, input.connector, input.dedupeKey) as Row | undefined;
+      if (existing) {
+        const record = this.#mapConnectorOutbox(existing);
+        const same = record.payloadHash === serialized.hash
+          && record.destination === input.destination;
+        this.#database.exec('COMMIT;');
+        return {
+          id: record.id,
+          created: false,
+          duplicate: same,
+          conflict: !same,
+          record,
+        };
+      }
+      this.#insertConnectorOutbox(input, availableAt);
+      const row = this.#database.prepare(`
+        SELECT * FROM connector_outbox WHERE tenant_id = ? AND connector = ? AND dedupe_key = ?
+      `).get(input.tenantId, input.connector, input.dedupeKey) as Row | undefined;
+      if (!row) throw new Error('Connector outbox row was not persisted');
+      const record = this.#mapConnectorOutbox(row);
+      this.#database.exec('COMMIT;');
+      return { id: record.id, created: true, duplicate: false, conflict: false, record };
+    } catch (error) {
+      this.#database.exec('ROLLBACK;');
+      if (String(error).includes('UNIQUE constraint failed')) {
+        const existing = this.#database.prepare(`
+          SELECT * FROM connector_outbox
+          WHERE tenant_id = ? AND connector = ? AND dedupe_key = ?
+          LIMIT 1
+        `).get(input.tenantId, input.connector, input.dedupeKey) as Row | undefined;
+        if (existing) {
+          const record = this.#mapConnectorOutbox(existing);
+          const same = record.payloadHash === serialized.hash
+            && record.destination === input.destination;
+          return {
+            id: record.id,
+            created: false,
+            duplicate: same,
+            conflict: !same,
+            record,
+          };
+        }
+      }
+      throw error;
+    }
+  }
+
+  async claimConnectorOutbox(
+    options: ConnectorQueueClaimOptions = {},
+  ): Promise<ConnectorOutboxRecord[]> {
+    const now = normalizeQueueTimestamp(options.now ?? new Date().toISOString(), 'now');
+    this.#assertQueueTimestamp(now, 'now');
+    const limit = boundedQueueInteger(options.limit, 1, 200, 25);
+    const leaseMs = boundedQueueInteger(options.leaseMs, 1_000, 86_400_000, 300_000);
+    const leaseExpiresAt = queueTimeAfter(now, leaseMs);
+    this.#database.exec('BEGIN IMMEDIATE;');
+    try {
+      const rows = this.#database.prepare(`
+        SELECT * FROM connector_outbox
+        WHERE available_at <= ?
+          AND (
+            status IN ('queued', 'retrying')
+            OR (status = 'processing' AND lease_expires_at <= ?)
+          )
+        ORDER BY available_at ASC, created_at ASC, id ASC
+        LIMIT ?
+      `).all(now, now, limit) as Row[];
+      const claimed: ConnectorOutboxRecord[] = [];
+      for (const row of rows) {
+        const claimToken = randomUUID();
+        const result = this.#database.prepare(`
+          UPDATE connector_outbox
+          SET status = 'processing', attempts = attempts + 1,
+              claimed_at = ?, claim_token = ?, lease_expires_at = ?, updated_at = ?
+          WHERE id = ?
+            AND available_at <= ?
+            AND (
+              status IN ('queued', 'retrying')
+              OR (status = 'processing' AND lease_expires_at <= ?)
+            )
+        `).run(now, claimToken, leaseExpiresAt, now, String(row.id), now, now);
+        if (Number(result.changes) !== 1) continue;
+        const claimedRow = this.#database.prepare('SELECT * FROM connector_outbox WHERE id = ?').get(String(row.id)) as Row | undefined;
+        if (claimedRow) claimed.push(this.#mapConnectorOutbox(claimedRow));
+      }
+      this.#database.exec('COMMIT;');
+      return claimed;
+    } catch (error) {
+      this.#database.exec('ROLLBACK;');
+      throw error;
+    }
+  }
+
+  async completeConnectorOutbox(id: string, claimToken: string, sentAt = new Date().toISOString()): Promise<boolean> {
+    sentAt = normalizeQueueTimestamp(sentAt, 'sentAt');
+    this.#assertQueueId(id, 'outbox id');
+    this.#assertQueueId(claimToken, 'outbox claim token');
+    this.#assertQueueTimestamp(sentAt, 'sentAt');
+    const result = this.#database.prepare(`
+      UPDATE connector_outbox
+      SET status = 'sent', sent_at = ?, claimed_at = NULL,
+          claim_token = NULL, lease_expires_at = NULL, updated_at = ?
+      WHERE id = ? AND status = 'processing' AND claim_token = ?
+    `).run(sentAt, sentAt, id, claimToken);
+    return Number(result.changes) === 1;
+  }
+
+  async failConnectorOutbox(input: ConnectorQueueFailureInput): Promise<ConnectorQueueFailureResult> {
+    return this.#failConnectorQueueRow('connector_outbox', input);
+  }
+
+  async retryConnectorOutbox(id: string, availableAt = new Date().toISOString(), tenantId?: string): Promise<boolean> {
+    availableAt = normalizeQueueTimestamp(availableAt, 'availableAt');
+    this.#assertQueueId(id, 'outbox id');
+    this.#assertQueueTimestamp(availableAt, 'availableAt');
+    const tenantClause = tenantId ? ' AND tenant_id = ?' : '';
+    const result = this.#database.prepare(`
+      UPDATE connector_outbox
+      SET status = 'queued', attempts = 0, available_at = ?,
+          claimed_at = NULL, claim_token = NULL, lease_expires_at = NULL,
+          last_error = NULL, dead_lettered_at = NULL, updated_at = ?
+      WHERE id = ? AND status IN ('retrying', 'dead_letter')${tenantClause}
+    `).run(...(tenantId ? [availableAt, availableAt, id, tenantId] : [availableAt, availableAt, id]));
+    return Number(result.changes) === 1;
+  }
+
+  async cancelConnectorOutbox(id: string, cancelledAt = new Date().toISOString(), tenantId?: string): Promise<boolean> {
+    cancelledAt = normalizeQueueTimestamp(cancelledAt, 'cancelledAt');
+    this.#assertQueueId(id, 'outbox id');
+    this.#assertQueueTimestamp(cancelledAt, 'cancelledAt');
+    const tenantClause = tenantId ? ' AND tenant_id = ?' : '';
+    const result = this.#database.prepare(`
+      UPDATE connector_outbox
+      SET status = 'dead_letter', available_at = ?,
+          claimed_at = NULL, claim_token = NULL, lease_expires_at = NULL,
+          last_error = 'cancelled_by_operator', dead_lettered_at = ?, updated_at = ?
+      WHERE id = ? AND status IN ('queued', 'retrying')${tenantClause}
+    `).run(...(tenantId
+      ? [cancelledAt, cancelledAt, cancelledAt, id, tenantId]
+      : [cancelledAt, cancelledAt, cancelledAt, id]));
+    return Number(result.changes) === 1;
+  }
+
+  async getConnectorQueueStats(connector?: string, tenantId?: string): Promise<ConnectorQueueStats> {
+    if (connector !== undefined) this.#assertQueueIdentity(tenantId ?? '__all__', connector, 'stats');
+    if (tenantId !== undefined && (tenantId.trim().length === 0 || tenantId.length > 500)) {
+      throw new TypeError('tenantId must be a non-empty string of at most 500 characters');
+    }
+    const generatedAt = new Date().toISOString();
+    const filters = [
+      ...(connector ? ['connector = ?'] : []),
+      ...(tenantId ? ['tenant_id = ?'] : []),
+    ];
+    const connectorClause = filters.length > 0 ? ` WHERE ${filters.join(' AND ')}` : '';
+    const params = [
+      ...(connector ? [connector] : []),
+      ...(tenantId ? [tenantId] : []),
+    ];
+    const inboxRows = this.#database.prepare(`
+      SELECT status, COUNT(*) AS count FROM connector_inbox${connectorClause} GROUP BY status
+    `).all(...params) as Row[];
+    const outboxRows = this.#database.prepare(`
+      SELECT status, COUNT(*) AS count FROM connector_outbox${connectorClause} GROUP BY status
+    `).all(...params) as Row[];
+    const inbox = queueStatusCounts(inboxRows, ['queued', 'processing', 'retrying', 'completed', 'dead_letter']);
+    const outbox = queueStatusCounts(outboxRows, ['queued', 'processing', 'retrying', 'sent', 'dead_letter']);
+    const pendingFilters = ["status IN ('queued', 'retrying')", ...(connector ? ['connector = ?'] : []), ...(tenantId ? ['tenant_id = ?'] : [])];
+    const pendingParams = [
+      ...(connector ? [connector] : []),
+      ...(tenantId ? [tenantId] : []),
+    ];
+    const oldestInbox = this.#database.prepare(`
+      SELECT MIN(available_at) AS value FROM connector_inbox
+      WHERE ${pendingFilters.join(' AND ')}
+    `).get(...pendingParams) as Row;
+    const oldestOutbox = this.#database.prepare(`
+      SELECT MIN(available_at) AS value FROM connector_outbox
+      WHERE ${pendingFilters.join(' AND ')}
+    `).get(...pendingParams) as Row;
+    return {
+      ...(connector ? { connector } : {}),
+      inbox,
+      outbox,
+      oldestInboxAvailableAt: valueOrNull(oldestInbox?.value),
+      oldestOutboxAvailableAt: valueOrNull(oldestOutbox?.value),
+      generatedAt,
+    };
+  }
+
   close(): void {
     this.#database.close();
   }
@@ -538,6 +1175,21 @@ export class SqliteAssetRepository implements
       if (version < 5) {
         this.#migrateSensitiveMetadata();
         this.#database.exec('PRAGMA user_version = 5;');
+        version = 5;
+      }
+      if (version < 6) {
+        this.#migrateFeishuInstallations();
+        this.#database.exec('PRAGMA user_version = 6;');
+        version = 6;
+      }
+      if (version < 7) {
+        this.#migrateConnectorQueues();
+        this.#database.exec('PRAGMA user_version = 7;');
+        version = 7;
+      }
+      if (version < 8) {
+        this.#migrateFeishuOAuthPkce();
+        this.#database.exec('PRAGMA user_version = 8;');
       }
       this.#database.exec('COMMIT;');
     } catch (error) {
@@ -788,10 +1440,302 @@ export class SqliteAssetRepository implements
     `);
   }
 
+  #migrateFeishuInstallations(): void {
+    this.#database.exec(`
+      CREATE TABLE IF NOT EXISTS feishu_oauth_states (
+        state_hash TEXT PRIMARY KEY,
+        app_id TEXT NOT NULL,
+        redirect_uri TEXT NOT NULL,
+        tenant_id TEXT,
+        user_id TEXT,
+        return_to TEXT,
+        encrypted_code_verifier TEXT,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        consumed_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS feishu_oauth_states_expiry_lookup
+        ON feishu_oauth_states (expires_at, consumed_at);
+
+      CREATE TABLE IF NOT EXISTS feishu_installations (
+        tenant_id TEXT NOT NULL,
+        app_id TEXT NOT NULL,
+        tenant_name TEXT,
+        encrypted_access_token TEXT NOT NULL,
+        encrypted_refresh_token TEXT,
+        access_token_expires_at TEXT,
+        refresh_token_expires_at TEXT,
+        scopes_json TEXT NOT NULL DEFAULT '[]',
+        open_id TEXT,
+        union_id TEXT,
+        installed_by_user_id TEXT,
+        status TEXT NOT NULL CHECK (status IN ('active', 'revoked')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        revoked_at TEXT,
+        PRIMARY KEY (tenant_id, app_id)
+      );
+      CREATE INDEX IF NOT EXISTS feishu_installations_status_lookup
+        ON feishu_installations (tenant_id, status, updated_at);
+    `);
+    const stateColumns = this.#database.prepare('PRAGMA table_info(feishu_oauth_states)').all() as Row[];
+    if (!stateColumns.some((column) => String(column.name) === 'encrypted_code_verifier')) {
+      this.#database.exec('ALTER TABLE feishu_oauth_states ADD COLUMN encrypted_code_verifier TEXT');
+    }
+  }
+
+  #migrateFeishuOAuthPkce(): void {
+    if (!this.#tableExists('feishu_oauth_states')) return;
+    const columns = this.#database.prepare('PRAGMA table_info(feishu_oauth_states)').all() as Row[];
+    if (columns.some((column) => String(column.name) === 'encrypted_code_verifier')) return;
+    this.#database.exec('ALTER TABLE feishu_oauth_states ADD COLUMN encrypted_code_verifier TEXT');
+  }
+
+  #migrateConnectorQueues(): void {
+    this.#database.exec(`
+      CREATE TABLE IF NOT EXISTS connector_inbox (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        connector TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        payload_hash TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('queued', 'processing', 'retrying', 'completed', 'dead_letter')),
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+        available_at TEXT NOT NULL,
+        claimed_at TEXT,
+        claim_token TEXT,
+        lease_expires_at TEXT,
+        last_error TEXT,
+        processed_at TEXT,
+        dead_lettered_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (tenant_id, connector, event_id)
+      );
+      CREATE INDEX IF NOT EXISTS connector_inbox_claim_lookup
+        ON connector_inbox (status, available_at, lease_expires_at, created_at);
+      CREATE INDEX IF NOT EXISTS connector_inbox_tenant_lookup
+        ON connector_inbox (tenant_id, connector, status, created_at);
+
+      CREATE TABLE IF NOT EXISTS connector_outbox (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        connector TEXT NOT NULL,
+        dedupe_key TEXT NOT NULL,
+        destination TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        payload_hash TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('queued', 'processing', 'retrying', 'sent', 'dead_letter')),
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+        available_at TEXT NOT NULL,
+        claimed_at TEXT,
+        claim_token TEXT,
+        lease_expires_at TEXT,
+        last_error TEXT,
+        sent_at TEXT,
+        dead_lettered_at TEXT,
+        source_inbox_id TEXT REFERENCES connector_inbox(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (tenant_id, connector, dedupe_key)
+      );
+      CREATE INDEX IF NOT EXISTS connector_outbox_claim_lookup
+        ON connector_outbox (status, available_at, lease_expires_at, created_at);
+      CREATE INDEX IF NOT EXISTS connector_outbox_tenant_lookup
+        ON connector_outbox (tenant_id, connector, status, created_at);
+    `);
+  }
+
   #ensureReminderColumn(name: 'notification_claimed_at' | 'notification_sent_at'): void {
     const columns = this.#database.prepare('PRAGMA table_info(reminders)').all() as Row[];
     if (columns.some((column) => String(column.name) === name)) return;
     this.#database.exec(`ALTER TABLE reminders ADD COLUMN ${name} TEXT`);
+  }
+
+  #assertQueueIdentity(tenantId: string, connector: string, key: string): void {
+    for (const [label, value] of [['tenantId', tenantId], ['connector', connector], ['queueKey', key]] as const) {
+      if (typeof value !== 'string' || value.trim().length === 0 || value.length > 500) {
+        throw new TypeError(`${label} must be a non-empty string of at most 500 characters`);
+      }
+    }
+  }
+
+  #assertQueueId(id: string, label: string, allowEmpty = false): void {
+    if (allowEmpty && id === '') return;
+    if (typeof id !== 'string' || id.trim().length === 0 || id.length > 200) {
+      throw new TypeError(`${label} must be a non-empty string of at most 200 characters`);
+    }
+  }
+
+  #assertQueueTimestamp(value: string, label: string): void {
+    if (typeof value !== 'string' || !value.trim() || !Number.isFinite(Date.parse(value))) {
+      throw new TypeError(`${label} must be a valid ISO timestamp`);
+    }
+  }
+
+  #assertQueueDestination(value: string): void {
+    if (typeof value !== 'string' || value.trim().length === 0 || value.length > 500) {
+      throw new TypeError('Connector outbox destination must be a non-empty string of at most 500 characters');
+    }
+  }
+
+  #insertConnectorOutbox(input: PersistConnectorOutboxInput, availableAt: string): void {
+    availableAt = normalizeQueueTimestamp(availableAt, 'availableAt');
+    const serialized = serializeConnectorPayload(input.payload);
+    const id = input.id ?? connectorQueueId('outbox');
+    this.#assertQueueIdentity(input.tenantId, input.connector, input.dedupeKey);
+    this.#assertQueueId(id, 'outbox id');
+    this.#assertQueueDestination(input.destination);
+    this.#assertQueueTimestamp(availableAt, 'availableAt');
+    if (input.sourceInboxId) {
+      this.#assertQueueId(input.sourceInboxId, 'source inbox id');
+      const source = this.#database.prepare(`
+        SELECT tenant_id, connector FROM connector_inbox WHERE id = ? LIMIT 1
+      `).get(input.sourceInboxId) as Row | undefined;
+      if (!source
+        || String(source.tenant_id) !== input.tenantId
+        || String(source.connector) !== input.connector) {
+        throw new Error('Connector outbox source inbox does not belong to the same tenant/connector');
+      }
+    }
+    try {
+      this.#database.prepare(`
+        INSERT INTO connector_outbox (
+          id, tenant_id, connector, dedupe_key, destination,
+          payload_json, payload_hash, status, attempts, available_at,
+          claimed_at, claim_token, lease_expires_at, last_error,
+          sent_at, dead_lettered_at, source_inbox_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, ?)
+      `).run(
+        id,
+        input.tenantId,
+        input.connector,
+        input.dedupeKey,
+        input.destination,
+        serialized.json,
+        serialized.hash,
+        availableAt,
+        input.sourceInboxId ?? null,
+        availableAt,
+        availableAt,
+      );
+    } catch (error) {
+      if (!String(error).includes('UNIQUE constraint failed')) throw error;
+      const existing = this.#database.prepare(`
+        SELECT payload_hash, destination FROM connector_outbox
+        WHERE tenant_id = ? AND connector = ? AND dedupe_key = ?
+        LIMIT 1
+      `).get(input.tenantId, input.connector, input.dedupeKey) as Row | undefined;
+      if (!existing
+        || String(existing.payload_hash) !== serialized.hash
+        || String(existing.destination) !== input.destination) {
+        throw new Error('Connector outbox dedupe key conflicts with a different payload');
+      }
+    }
+  }
+
+  async #failConnectorQueueRow(
+    table: 'connector_inbox' | 'connector_outbox',
+    input: ConnectorQueueFailureInput,
+  ): Promise<ConnectorQueueFailureResult> {
+    const failedAt = input.failedAt ?? new Date().toISOString();
+    this.#assertQueueId(input.id, `${table} id`);
+    this.#assertQueueId(input.claimToken, `${table} claim token`);
+    this.#assertQueueTimestamp(failedAt, 'failedAt');
+    const maxAttempts = boundedQueueInteger(input.maxAttempts, 1, 100, 8);
+    const backoffBaseMs = boundedQueueInteger(input.backoffBaseMs, 1, 86_400_000, 1_000);
+    const backoffMaxMs = boundedQueueInteger(input.backoffMaxMs, backoffBaseMs, 7 * 86_400_000, 300_000);
+    const lastError = sanitizeQueueError(input.error);
+    this.#database.exec('BEGIN IMMEDIATE;');
+    try {
+      const row = this.#database.prepare(`
+        SELECT attempts FROM ${table}
+        WHERE id = ? AND status = 'processing' AND claim_token = ?
+        LIMIT 1
+      `).get(input.id, input.claimToken) as Row | undefined;
+      if (!row) {
+        this.#database.exec('COMMIT;');
+        return { updated: false };
+      }
+      const attempts = Number(row.attempts);
+      const dead = attempts >= maxAttempts;
+      const status = dead ? 'dead_letter' : 'retrying';
+      const availableAt = dead
+        ? failedAt
+        : nextConnectorRetryAt(failedAt, attempts, backoffBaseMs, backoffMaxMs);
+      const result = this.#database.prepare(`
+        UPDATE ${table}
+        SET status = ?, available_at = ?, last_error = ?,
+            dead_lettered_at = ?, claimed_at = NULL, claim_token = NULL,
+            lease_expires_at = NULL, updated_at = ?
+        WHERE id = ? AND status = 'processing' AND claim_token = ?
+      `).run(
+        status,
+        availableAt,
+        lastError,
+        dead ? failedAt : null,
+        failedAt,
+        input.id,
+        input.claimToken,
+      );
+      this.#database.exec('COMMIT;');
+      return {
+        updated: Number(result.changes) === 1,
+        status,
+        availableAt,
+        attempts,
+      };
+    } catch (error) {
+      this.#database.exec('ROLLBACK;');
+      throw error;
+    }
+  }
+
+  #mapConnectorInbox(row: Row): ConnectorInboxRecord {
+    return {
+      id: String(row.id),
+      tenantId: String(row.tenant_id),
+      connector: String(row.connector),
+      eventId: String(row.event_id),
+      payload: parseQueuePayload(row.payload_json),
+      payloadHash: String(row.payload_hash),
+      status: connectorInboxStatus(String(row.status)),
+      attempts: Number(row.attempts),
+      availableAt: String(row.available_at),
+      claimedAt: nullableString(row.claimed_at),
+      claimToken: nullableString(row.claim_token),
+      leaseExpiresAt: nullableString(row.lease_expires_at),
+      lastError: nullableString(row.last_error),
+      processedAt: nullableString(row.processed_at),
+      deadLetteredAt: nullableString(row.dead_lettered_at),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
+  }
+
+  #mapConnectorOutbox(row: Row): ConnectorOutboxRecord {
+    return {
+      id: String(row.id),
+      tenantId: String(row.tenant_id),
+      connector: String(row.connector),
+      dedupeKey: String(row.dedupe_key),
+      destination: String(row.destination),
+      payload: parseQueuePayload(row.payload_json),
+      payloadHash: String(row.payload_hash),
+      status: connectorOutboxStatus(String(row.status)),
+      attempts: Number(row.attempts),
+      availableAt: String(row.available_at),
+      claimedAt: nullableString(row.claimed_at),
+      claimToken: nullableString(row.claim_token),
+      leaseExpiresAt: nullableString(row.lease_expires_at),
+      lastError: nullableString(row.last_error),
+      sentAt: nullableString(row.sent_at),
+      deadLetteredAt: nullableString(row.dead_lettered_at),
+      sourceInboxId: nullableString(row.source_inbox_id),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
   }
 
   #insertSource(assetId: string, source: SourceReference): void {
@@ -921,6 +1865,68 @@ export class SqliteAssetRepository implements
     return reminder;
   }
 
+  #mapFeishuOAuthState(row: Row): FeishuOAuthState {
+    const state: FeishuOAuthState = {
+      stateHash: String(row.state_hash),
+      appId: String(row.app_id),
+      redirectUri: String(row.redirect_uri),
+      createdAt: String(row.created_at),
+      expiresAt: String(row.expires_at),
+      consumedAt: String(row.consumed_at),
+    };
+    if (row.tenant_id !== null && row.tenant_id !== undefined) {
+      state.tenantId = String(row.tenant_id);
+    }
+    if (row.user_id !== null && row.user_id !== undefined) {
+      state.userId = String(row.user_id);
+    }
+    if (row.return_to !== null && row.return_to !== undefined) {
+      state.returnTo = String(row.return_to);
+    }
+    if (row.encrypted_code_verifier !== null && row.encrypted_code_verifier !== undefined) {
+      state.encryptedCodeVerifier = String(row.encrypted_code_verifier);
+    }
+    return state;
+  }
+
+  #mapFeishuInstallation(row: Row): FeishuInstallation {
+    let scopes: string[] = [];
+    try {
+      const parsed = JSON.parse(String(row.scopes_json)) as unknown;
+      if (Array.isArray(parsed)) {
+        scopes = uniqueSortedStrings(parsed.filter((item): item is string => typeof item === 'string'));
+      }
+    } catch {
+      // A corrupt scope cache must not make the installation unusable.
+      scopes = [];
+    }
+    const installation: FeishuInstallation = {
+      tenantId: String(row.tenant_id),
+      appId: String(row.app_id),
+      encryptedAccessToken: String(row.encrypted_access_token),
+      scopes,
+      status: row.status === 'revoked' ? 'revoked' : 'active',
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
+    const optional: Array<[keyof FeishuInstallation, unknown]> = [
+      ['tenantName', row.tenant_name],
+      ['encryptedRefreshToken', row.encrypted_refresh_token],
+      ['accessTokenExpiresAt', row.access_token_expires_at],
+      ['refreshTokenExpiresAt', row.refresh_token_expires_at],
+      ['openId', row.open_id],
+      ['unionId', row.union_id],
+      ['installedByUserId', row.installed_by_user_id],
+      ['revokedAt', row.revoked_at],
+    ];
+    for (const [key, value] of optional) {
+      if (value !== null && value !== undefined) {
+        (installation as unknown as Record<string, unknown>)[key] = String(value);
+      }
+    }
+    return installation;
+  }
+
   #reminderStatus(value: string): ReminderStatus {
     const supported: ReminderStatus[] = ['scheduled', 'needs_confirmation', 'completed', 'cancelled'];
     return supported.includes(value as ReminderStatus) ? value as ReminderStatus : 'scheduled';
@@ -975,4 +1981,79 @@ function decodeAssetCursor(value: string): AssetCursor {
     if (error instanceof InvalidAssetCursorError) throw error;
     throw new InvalidAssetCursorError();
   }
+}
+
+function uniqueSortedStrings(values: string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))].sort();
+}
+
+function boundedQueueInteger(
+  value: number | undefined,
+  minimum: number,
+  maximum: number,
+  fallback: number,
+): number {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new RangeError(`Connector queue option must be an integer between ${minimum} and ${maximum}`);
+  }
+  return value;
+}
+
+function queueTimeAfter(value: string, milliseconds: number): string {
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) throw new RangeError('Connector queue timestamps must be valid ISO dates');
+  return new Date(parsed + milliseconds).toISOString();
+}
+
+function normalizeQueueTimestamp(value: string, label: string): string {
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) throw new TypeError(`${label} must be a valid ISO timestamp`);
+  return new Date(parsed).toISOString();
+}
+
+function nullableString(value: unknown): string | null {
+  return value === null || value === undefined ? null : String(value);
+}
+
+function valueOrNull(value: unknown): string | null {
+  return value === null || value === undefined ? null : String(value);
+}
+
+function parseQueuePayload(value: unknown): unknown {
+  try {
+    return JSON.parse(String(value));
+  } catch {
+    // A malformed payload should never crash the worker or leak raw storage;
+    // preserve only a safe diagnostic marker for operators.
+    return '[REDACTED:invalid_payload]';
+  }
+}
+
+function connectorInboxStatus(value: string): ConnectorInboxStatus {
+  const statuses: ConnectorInboxStatus[] = ['queued', 'processing', 'retrying', 'completed', 'dead_letter'];
+  return statuses.includes(value as ConnectorInboxStatus) ? value as ConnectorInboxStatus : 'dead_letter';
+}
+
+function connectorOutboxStatus(value: string): ConnectorOutboxStatus {
+  const statuses: ConnectorOutboxStatus[] = ['queued', 'processing', 'retrying', 'sent', 'dead_letter'];
+  return statuses.includes(value as ConnectorOutboxStatus) ? value as ConnectorOutboxStatus : 'dead_letter';
+}
+
+function queueStatusCounts(
+  rows: Row[],
+  statuses: string[],
+): ConnectorQueueStatusCounts<string> {
+  const counts: ConnectorQueueStatusCounts<string> = {
+    queued: 0,
+    processing: 0,
+    retrying: 0,
+    dead_letter: 0,
+  };
+  for (const status of statuses) counts[status] = 0;
+  for (const row of rows) {
+    const status = String(row.status);
+    counts[status] = Number(row.count);
+  }
+  return counts;
 }

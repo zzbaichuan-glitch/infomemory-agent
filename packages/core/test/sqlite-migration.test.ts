@@ -71,7 +71,7 @@ describe('SqliteAssetRepository migrations', () => {
         const version = migrated.prepare('PRAGMA user_version').get() as { user_version: number };
         const columns = migrated.prepare('PRAGMA table_info(asset_ingestions)').all() as Array<{ name: string }>;
         const assetCount = migrated.prepare('SELECT COUNT(*) AS count FROM assets').get() as { count: number };
-        expect(version.user_version).toBe(5);
+        expect(version.user_version).toBe(8);
         expect(columns.map((column) => column.name)).toEqual(expect.arrayContaining([
           'actor_id',
           'operation',
@@ -79,6 +79,15 @@ describe('SqliteAssetRepository migrations', () => {
           'created_at',
         ]));
         expect(Number(assetCount.count)).toBe(1);
+        const feishuTables = migrated.prepare(`
+          SELECT name FROM sqlite_master
+          WHERE type = 'table' AND name IN ('feishu_oauth_states', 'feishu_installations')
+          ORDER BY name
+        `).all() as Array<{ name: string }>;
+        expect(feishuTables.map((table) => table.name)).toEqual([
+          'feishu_installations',
+          'feishu_oauth_states',
+        ]);
 
         const asset = migrated.prepare(`
           SELECT title, redacted_content, secret_finding_count

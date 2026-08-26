@@ -66,10 +66,13 @@ try {
   $ready = Invoke-ApiJson -Method Get -Path '/health/ready' -RequestHeaders @{}
   $health = Invoke-ApiJson -Method Get -Path '/health' -RequestHeaders @{}
   $openapi = Invoke-WebRequest -Method Get -Uri ("{0}/openapi.yaml" -f $BaseUrl.TrimEnd('/')) -UseBasicParsing
+  $workbench = Invoke-WebRequest -Method Get -Uri ("{0}/app/" -f $BaseUrl.TrimEnd('/')) -UseBasicParsing
   Assert-True ($live.status -eq 'ok') '存活探针不是 ok'
   Assert-True ($ready.status -eq 'ready') '就绪探针不是 ready'
-  Assert-True ($health.version -eq '0.2.0') '健康页版本不是 0.2.0'
+  Assert-True ($health.version -eq '0.3.0') '健康页版本不是 0.3.0'
   Assert-True ($openapi.StatusCode -eq 200 -and $openapi.Content.Length -gt 1000) 'OpenAPI 文档不可用'
+  Assert-True ($workbench.StatusCode -eq 200 -and $workbench.Content -like '*知澜工作台*') 'Web 工作台页面不可用'
+  Assert-True ($workbench.Content -notmatch 'AUTH_SECRET|FEISHU_APP_SECRET|LLM_API_KEY') 'Web 工作台页面疑似泄露服务器配置名称'
 
   $assetHeaders = $headers.Clone()
   $assetHeaders['idempotency-key'] = $idempotencyKey
@@ -130,6 +133,7 @@ try {
     status = 'acceptance_passed'
     authMode = $authMode
     version = $health.version
+    workbench = 'ok'
     searchEvidence = @($search.evidence).Count
     answerStatus = $answer.status
     reminderStatus = $completed.reminder.status

@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <meta name="color-scheme" content="light dark">
+    <title>知澜 · 团队记忆工作台</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/app/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand-lockup">
+        <div class="brand-mark" aria-hidden="true">澜</div>
+        <div>
+          <p class="eyebrow">INFOMEMORY AGENT</p>
+          <h1>知澜工作台</h1>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <span id="connection-pill" class="status-pill status-idle">未连接</span>
+        <button id="refresh-all" class="button button-quiet" type="button">刷新</button>
+        <button id="sign-out" class="button button-quiet" type="button">清除会话</button>
+      </div>
+    </header>
+
+    <main class="shell">
+      <section id="setup-panel" class="panel setup-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="section-kicker">第一步</p>
+            <h2>连接工作区</h2>
+            <p class="muted">身份只用于请求当前 API。页面不会读取、展示或上传服务器密钥。</p>
+          </div>
+          <span id="auth-mode-badge" class="badge">trusted headers</span>
+        </div>
+        <form id="identity-form" class="form-grid" method="post" action="/app/">
+          <label>
+            <span>租户 ID</span>
+            <input id="tenant-id" name="tenantId" autocomplete="organization" required maxlength="200" placeholder="例如：demo-tenant">
+          </label>
+          <label>
+            <span>用户 ID</span>
+            <input id="user-id" name="userId" autocomplete="username" required maxlength="200" placeholder="例如：alice">
+          </label>
+          <label>
+            <span>认证模式</span>
+            <select id="auth-mode" name="authMode">
+              <option value="trusted_headers">开发：Trusted headers</option>
+              <option value="bearer">生产：Bearer token</option>
+            </select>
+          </label>
+          <label id="token-field" class="token-field is-hidden">
+            <span>Bearer token</span>
+            <input id="access-token" name="token" type="password" autocomplete="new-password" maxlength="20000" placeholder="粘贴访问令牌；不会显示在 URL 中">
+          </label>
+          <div class="form-actions">
+            <label class="check-row">
+              <input id="remember-session" type="checkbox">
+              <span>记住租户/用户身份（不会保存 Bearer 令牌）</span>
+            </label>
+            <button class="button button-primary" type="submit">连接并加载</button>
+          </div>
+        </form>
+        <p id="auth-help" class="inline-note">开发模式会发送 x-tenant-id 与 x-user-id 请求头；生产模式必须填写 Bearer token。</p>
+      </section>
+
+      <section id="workspace" class="workspace is-hidden" aria-live="polite">
+        <div class="overview-grid">
+          <article class="panel metric-panel">
+            <div class="metric-icon metric-icon-blue">⌁</div>
+            <div><p class="metric-label">工作区</p><strong id="workspace-label">—</strong><p id="workspace-user" class="muted">—</p></div>
+          </article>
+          <article class="panel metric-panel">
+            <div class="metric-icon metric-icon-green">✓</div>
+            <div><p class="metric-label">服务状态</p><strong id="service-status">检查中…</strong><p id="service-version" class="muted">—</p></div>
+          </article>
+          <article class="panel metric-panel">
+            <div class="metric-icon metric-icon-amber">◈</div>
+            <div><p class="metric-label">飞书连接器</p><strong id="feishu-status">检查中…</strong><p id="feishu-detail" class="muted">不会显示应用凭据</p></div>
+          </article>
+        </div>
+
+        <nav class="tabs" aria-label="工作台功能">
+          <button class="tab is-active" type="button" data-tab="memory">记忆库</button>
+          <button class="tab" type="button" data-tab="search">检索与问答</button>
+          <button class="tab" type="button" data-tab="reminders">提醒</button>
+          <button class="tab" type="button" data-tab="connectors">连接器</button>
+        </nav>
+
+        <section class="tab-panel is-active" data-panel="memory">
+          <div class="two-column">
+            <article class="panel">
+              <div class="panel-heading compact">
+                <div><p class="section-kicker">写入</p><h2>新增一条记忆</h2></div>
+                <span class="badge badge-soft">自动脱敏</span>
+              </div>
+              <form id="asset-form" class="stack-form" method="post" action="/app/">
+                <label><span>标题</span><input id="asset-title" required maxlength="300" placeholder="例如：发布流程说明"></label>
+                <label><span>正文</span><textarea id="asset-content" required maxlength="1000000" rows="8" placeholder="把会议结论、文档片段或操作说明放在这里…"></textarea></label>
+                <div class="inline-fields">
+                  <label><span>可见性</span><select id="asset-visibility"><option value="owner">仅自己可见</option><option value="tenant">租户内共享</option></select></label>
+                  <label><span>幂等键</span><input id="asset-idempotency" required maxlength="500"></label>
+                </div>
+                <div class="inline-fields">
+                  <label><span>来源类型</span><select id="asset-source-type"><option value="manual">手工记录</option><option value="local_file">本地文件</option><option value="feishu_message">飞书消息</option><option value="feishu_document">飞书文档</option></select></label>
+                  <label><span>来源 URL（可选）</span><input id="asset-source-url" type="url" maxlength="2000" placeholder="https://…"></label>
+                </div>
+                <button class="button button-primary" type="submit">保存到记忆库</button>
+              </form>
+              <div id="asset-write-result" class="result-box is-hidden"></div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-heading compact">
+                <div><p class="section-kicker">浏览</p><h2>最近记忆</h2></div>
+                <div class="item-actions"><select id="asset-filter-visibility" class="status-select" aria-label="按可见性筛选"><option value="">全部可见性</option><option value="owner">仅所有者</option><option value="tenant">租户共享</option></select><button id="reload-assets" class="button button-quiet button-small" type="button">重新加载</button></div>
+              </div>
+              <div id="asset-list" class="item-list"><div class="empty-state">连接后加载资产。</div></div>
+              <div class="list-footer"><span id="asset-page-note" class="muted"></span><button id="load-more-assets" class="button button-quiet button-small is-hidden" type="button">加载更多</button></div>
+              <div id="asset-detail" class="detail-box is-hidden"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="tab-panel" data-panel="search">
+          <div class="two-column">
+            <article class="panel">
+              <div class="panel-heading compact"><div><p class="section-kicker">证据检索</p><h2>搜索记忆</h2></div></div>
+              <form id="search-form" class="stack-form" method="post" action="/app/">
+                <label><span>关键词</span><input id="search-query" required maxlength="1000" placeholder="例如：发布流程、数据库配置"></label>
+                <div class="inline-fields"><label><span>返回条数</span><input id="search-limit" type="number" min="1" max="20" value="8"></label><span></span></div>
+                <button class="button button-primary" type="submit">搜索</button>
+              </form>
+              <div id="search-result" class="result-box is-hidden"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-heading compact"><div><p class="section-kicker">引用门控</p><h2>证据问答</h2></div><span class="badge badge-soft">无证据不猜测</span></div>
+              <form id="answer-form" class="stack-form" method="post" action="/app/">
+                <label><span>问题</span><textarea id="answer-query" required maxlength="1000" rows="4" placeholder="例如：发布流程由谁维护？"></textarea></label>
+                <button class="button button-primary" type="submit">生成回答</button>
+              </form>
+              <div id="answer-result" class="result-box is-hidden"></div>
+            </article>
+          </div>
+          <article class="panel evidence-panel"><div class="panel-heading compact"><div><p class="section-kicker">可追溯来源</p><h2>证据详情</h2></div></div><div id="evidence-list" class="evidence-list"><div class="empty-state">搜索或提问后，这里会显示授权证据。</div></div></article>
+        </section>
+
+        <section class="tab-panel" data-panel="reminders">
+          <div class="two-column">
+            <article class="panel">
+              <div class="panel-heading compact"><div><p class="section-kicker">安排</p><h2>新建提醒</h2></div><span class="badge badge-soft">按浏览器本地时间提交</span></div>
+              <form id="reminder-form" class="stack-form" method="post" action="/app/">
+                <label><span>提醒标题</span><input id="reminder-title" required maxlength="300" placeholder="例如：项目复盘"></label>
+                <div class="inline-fields"><label><span>开始时间</span><input id="reminder-starts" type="datetime-local" required></label><label><span>提醒时间（可选）</span><input id="reminder-at" type="datetime-local"></label></div>
+                <button class="button button-primary" type="submit">创建提醒</button>
+              </form>
+              <div id="reminder-write-result" class="result-box is-hidden"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-heading compact"><div><p class="section-kicker">管理</p><h2>我的提醒</h2></div><div class="item-actions"><select id="reminder-filter-status" class="status-select" aria-label="按提醒状态筛选"><option value="">全部状态</option><option value="scheduled">已安排</option><option value="needs_confirmation">待确认</option><option value="completed">已完成</option><option value="cancelled">已取消</option></select><button id="reload-reminders" class="button button-quiet button-small" type="button">重新加载</button></div></div>
+              <div id="reminder-list" class="item-list"><div class="empty-state">连接后加载提醒。</div></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="tab-panel" data-panel="connectors">
+          <article class="panel connector-panel">
+            <div class="panel-heading"><div><p class="section-kicker">集成</p><h2>连接器状态</h2><p class="muted">状态只显示能力开关，不会返回 Verification Token、Encrypt Key、App Secret 或访问令牌。</p></div><button id="reload-health" class="button button-quiet" type="button">刷新状态</button></div>
+            <div id="connector-status" class="connector-grid"><div class="empty-state">正在读取服务状态…</div></div>
+            <div class="installation-box">
+              <div class="installation-heading">
+                <div><strong>飞书租户安装</strong><p class="muted">通过 OAuth 安装后，凭据只会以加密形式保存在服务端；工作台仅显示非敏感状态。</p></div>
+                <div class="item-actions"><button id="start-feishu-oauth" class="button button-primary button-small" type="button">开始安装</button><button id="refresh-feishu" class="button button-quiet button-small is-hidden" type="button">刷新凭据</button><button id="revoke-feishu" class="button button-danger button-small is-hidden" type="button">撤销安装</button></div>
+              </div>
+              <div id="feishu-installation" class="installation-detail"><span class="muted">正在读取安装状态…</span></div>
+            </div>
+            <div class="connector-next"><strong>飞书回调地址</strong><code id="feishu-callback-url">/v1/connectors/feishu/events</code><span class="muted">公网部署时请使用 HTTPS，并在飞书开放平台配置最小权限。</span></div>
+          </article>
+        </section>
+      </section>
+    </main>
+
+    <div id="toast-region" class="toast-region" role="status" aria-live="polite"></div>
+    <footer class="footer">知澜 · 安全优先的团队记忆 <span>·</span> <a href="/openapi.yaml" target="_blank" rel="noreferrer">OpenAPI</a></footer>
+    <script src="/app/app.js" defer></script>
+  </body>
+</html>

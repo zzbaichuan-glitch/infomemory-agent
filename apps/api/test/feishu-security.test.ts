@@ -40,6 +40,24 @@ describe('Feishu webhook transport security', () => {
     expect(response.json()).toEqual({ challenge: 'secure-challenge' });
   });
 
+  it('accepts an encrypted URL challenge without callback signature headers', async () => {
+    const payload = {
+      encrypt: encrypt({
+        type: 'url_verification',
+        token: 'expected-token',
+        challenge: 'unsigned-challenge',
+      }),
+    };
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/connectors/feishu/events',
+      payload,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ challenge: 'unsigned-challenge' });
+  });
+
   it('rejects a correctly signed plaintext downgrade when encryption is configured', async () => {
     const payload = {
       type: 'url_verification',
@@ -74,8 +92,10 @@ describe('Feishu webhook transport security', () => {
 
   function encrypt(value: unknown): string {
     const key = createHash('sha256').update(encryptKey).digest();
-    const cipher = createCipheriv('aes-256-cbc', key, key.subarray(0, 16));
+    const iv = Buffer.alloc(16, 11);
+    const cipher = createCipheriv('aes-256-cbc', key, iv);
     return Buffer.concat([
+      iv,
       cipher.update(JSON.stringify(value), 'utf8'),
       cipher.final(),
     ]).toString('base64');

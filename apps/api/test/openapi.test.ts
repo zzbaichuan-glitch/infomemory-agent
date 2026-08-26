@@ -16,11 +16,20 @@ describe('OpenAPI document', () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.headers['content-type']).toContain('application/yaml');
-    expect(response.body).toContain('version: 0.2.0');
+    expect(response.body).toContain('openapi: 3.1.0');
+    expect(response.body).toContain('version: 0.3.0');
     expect(response.body).toContain('/v1/assets:');
     expect(response.body).toContain('/v1/reminders/{id}:');
     expect(response.body).toContain('operationId: deleteReminder');
     expect(response.body).toContain('/v1/connectors/feishu/events:');
+    expect(response.body).toContain('$ref: "#/components/schemas/FeishuEventResponse"');
+    expect(response.body).toContain('/v1/admin/connectors/queue:');
+    expect(response.body).toContain('operationId: getConnectorQueueStats');
+    expect(response.body).toContain('ConnectorQueueStats:');
+    expect(response.body).toContain('ConnectorInboxStatusCounts:');
+    expect(response.body).toContain('ConnectorOutboxStatusCounts:');
+    expect(response.body).toContain('required: [queued, processing, retrying, completed, dead_letter]');
+    expect(response.body).toContain('required: [queued, processing, retrying, sent, dead_letter]');
     expect(response.body).not.toContain('AUTH_SECRET');
   });
 });

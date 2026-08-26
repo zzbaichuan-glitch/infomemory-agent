@@ -5,6 +5,7 @@ import type {
   FastifyRequest,
 } from 'fastify';
 import {
+  ConnectorQueueConflictError,
   IdempotencyConflictError,
   InvalidAssetCursorError,
   InvalidReminderTransitionError,
@@ -17,6 +18,7 @@ import {
   FeishuVerificationError,
 } from '../feishu/feishu-event-service.js';
 import { FeishuSignatureError } from '../feishu/feishu-signature.js';
+import { FeishuOAuthError } from '../feishu/feishu-oauth-service.js';
 import {
   AuthenticationError,
   AuthorizationError,
@@ -110,11 +112,31 @@ function describeError(error: unknown): ErrorDescriptor {
       message: 'Feishu callback is not configured',
     };
   }
+  if (error instanceof FeishuOAuthError) {
+    const statusCode = error.code === 'feishu_oauth_not_configured' ? 503
+      : error.code === 'feishu_oauth_state_invalid' || error.code === 'feishu_oauth_callback_invalid'
+        ? 400
+        : error.code === 'feishu_oauth_tenant_mismatch' ? 403
+          : error.code === 'feishu_oauth_refresh_unavailable' ? 404
+            : error.code === 'feishu_oauth_refresh_conflict' ? 409 : 502;
+    return {
+      statusCode,
+      code: error.code,
+      message: error.message,
+    };
+  }
   if (error instanceof IdempotencyConflictError) {
     return {
       statusCode: 409,
       code: 'idempotency_conflict',
       message: 'The idempotency key was already used for a different request',
+    };
+  }
+  if (error instanceof ConnectorQueueConflictError) {
+    return {
+      statusCode: 409,
+      code: 'connector_queue_conflict',
+      message: 'The connector event key was already used for a different payload',
     };
   }
   if (error instanceof InvalidAssetCursorError) {

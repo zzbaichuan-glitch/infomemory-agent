@@ -21,6 +21,7 @@ export class ReminderNotificationWorker {
   readonly #onError: (error: unknown) => void;
   #timer: ReturnType<typeof setInterval> | undefined;
   #running = false;
+  #inFlight: Promise<number> | undefined;
 
   constructor(
     private readonly repository: ReminderDeliveryRepository,
@@ -49,8 +50,30 @@ export class ReminderNotificationWorker {
     this.#timer = undefined;
   }
 
+  /** Stop scheduling new notifications and wait for the active tick to settle. */
+  async stopAndDrain(): Promise<void> {
+    this.stop();
+    const inFlight = this.#inFlight;
+    if (!inFlight) return;
+    try {
+      await inFlight;
+    } catch (error) {
+      this.#onError(error);
+    }
+  }
+
   async tick(at = this.#now()): Promise<number> {
     if (this.#running) return 0;
+    const inFlight = this.#runTick(at);
+    this.#inFlight = inFlight;
+    try {
+      return await inFlight;
+    } finally {
+      if (this.#inFlight === inFlight) this.#inFlight = undefined;
+    }
+  }
+
+  async #runTick(at: Date): Promise<number> {
     this.#running = true;
     const claimedAt = at.toISOString();
     try {

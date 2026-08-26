@@ -3,17 +3,15 @@ dist/
 coverage/
 .cache/
 .npm-cache/
+.playwright-cli/
+output/
 
 .env
 .env.*
 !.env.example
 
-var/*.sqlite
-var/*.sqlite-shm
-var/*.sqlite-wal
-**/var/*.sqlite
-**/var/*.sqlite-shm
-**/var/*.sqlite-wal
+var/
+**/var/
 *.log
 
 .idea/

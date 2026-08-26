@@ -12,6 +12,7 @@ COPY tsconfig.base.json ./
 COPY apps/api/tsconfig.json apps/api/tsconfig.json
 COPY packages/core/tsconfig.json packages/core/tsconfig.json
 COPY apps/api/src apps/api/src
+COPY apps/api/public apps/api/public
 COPY packages/core/src packages/core/src
 
 RUN npm run build && npm prune --omit=dev
@@ -30,6 +31,7 @@ COPY --from=build --chown=node:node /workspace/package.json /workspace/package-l
 COPY --from=build --chown=node:node /workspace/node_modules ./node_modules
 COPY --from=build --chown=node:node /workspace/apps/api/package.json apps/api/package.json
 COPY --from=build --chown=node:node /workspace/apps/api/dist apps/api/dist
+COPY --from=build --chown=node:node /workspace/apps/api/public apps/api/public
 COPY --from=build --chown=node:node /workspace/packages/core/package.json packages/core/package.json
 COPY --from=build --chown=node:node /workspace/packages/core/dist packages/core/dist
 COPY --chown=node:node docs/api docs/api

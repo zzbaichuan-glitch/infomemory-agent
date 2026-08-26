@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: InfoMemory Agent API
-  version: 0.2.0
+  version: 0.3.0
   description: >-
     Security-first enterprise memory API. Production requests use a signed Bearer
     token. The x-tenant-id/x-user-id development identity is forbidden in production.
@@ -266,9 +266,196 @@ paths:
           application/json:
             schema: { type: object, additionalProperties: true }
       responses:
-        "200": { description: Challenge or acknowledged event }
+        "200":
+          description: Challenge, synchronous acknowledgement, or asynchronous queue acknowledgement
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FeishuEventResponse" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/admin/connectors/queue:
+    get:
+      tags: [Connectors]
+      operationId: getConnectorQueueStats
+      description: >-
+        Tenant-scoped operational queue statistics. Payloads and error details
+        are intentionally never returned. Requires connector:queue:read or an
+        administrator role.
+      parameters:
+        - name: connector
+          in: query
+          schema: { type: string, maxLength: 100 }
+      responses:
+        "200":
+          description: Inbox/outbox counts and oldest pending timestamps
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConnectorQueueStats" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /v1/admin/connectors/queue/inbox/{id}/retry:
+    post:
+      tags: [Connectors]
+      operationId: retryConnectorInbox
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, maxLength: 200 } }
+      responses:
+        "200": { description: Inbox row requeued }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/connectors/queue/outbox/{id}/retry:
+    post:
+      tags: [Connectors]
+      operationId: retryConnectorOutbox
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, maxLength: 200 } }
+      responses:
+        "200": { description: Outbox row requeued }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/connectors/queue/inbox/{id}/cancel:
+    post:
+      tags: [Connectors]
+      operationId: cancelConnectorInbox
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, maxLength: 200 } }
+      responses:
+        "200": { description: Inbox row moved to dead letter }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/admin/connectors/queue/outbox/{id}/cancel:
+    post:
+      tags: [Connectors]
+      operationId: cancelConnectorOutbox
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, maxLength: 200 } }
+      responses:
+        "200": { description: Outbox row moved to dead letter }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/connectors/feishu/oauth/start:
+    get:
+      tags: [Connectors]
+      operationId: startFeishuOAuth
+      description: >-
+        Creates a short-lived, one-time CSRF state and returns the Feishu
+        authorization URL. Requires a tenant administrator permission.
+      parameters:
+        - name: returnTo
+          in: query
+          required: false
+          description: Local application path to display after installation; external URLs are rejected.
+          schema: { type: string, maxLength: 500, pattern: '^/(?!/)' }
+      responses:
+        "200":
+          description: Authorization URL; the state value is never persisted in plaintext.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FeishuOAuthStart" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/connectors/feishu/oauth/callback:
+    get:
+      tags: [Connectors]
+      operationId: completeFeishuOAuth
+      security: []
+      description: >-
+        Public OAuth callback. The one-time state is atomically consumed before
+        code exchange; access and refresh tokens are encrypted at rest and never
+        returned to the caller.
+      parameters:
+        - { name: code, in: query, schema: { type: string, maxLength: 4000 } }
+        - { name: state, in: query, schema: { type: string, maxLength: 512 } }
+        - { name: error, in: query, schema: { type: string, maxLength: 200 } }
+      responses:
+        "200":
+          description: Installation metadata without credentials
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FeishuOAuthCallback" }
+        "303":
+          description: >-
+            Browser flow redirected to the validated first-party returnTo path;
+            successful installs use feishu=connected and provider-denied installs
+            use feishu=error. Provider error text and OAuth credentials are never
+            reflected in the redirect.
+          headers:
+            Location:
+              schema: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/connectors/feishu/installation:
+    get:
+      tags: [Connectors]
+      operationId: getFeishuInstallation
+      description: Returns current tenant installation metadata; credentials are never exposed.
+      responses:
+        "200":
+          description: Installation metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [installation]
+                properties:
+                  installation: { $ref: "#/components/schemas/FeishuInstallation" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Connectors]
+      operationId: revokeFeishuInstallation
+      description: Revokes the local installation record for the current tenant.
+      responses:
+        "200":
+          description: Installation revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [revoked, tenantId]
+                properties:
+                  revoked: { type: boolean, const: true }
+                  tenantId: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/connectors/feishu/installation/refresh:
+    post:
+      tags: [Connectors]
+      operationId: refreshFeishuInstallation
+      description: >-
+        Rotates the current tenant's access token using its encrypted refresh
+        session. Compare-and-set prevents stale concurrent rotations.
+      responses:
+        "200":
+          description: Refreshed installation metadata without credentials
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [installation]
+                properties:
+                  installation: { $ref: "#/components/schemas/FeishuInstallation" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
 components:
   securitySchemes:
     bearerAuth:
@@ -321,7 +508,15 @@ components:
       description: Service is not ready
       content:
         application/json:
-          schema: { $ref: "#/components/schemas/Readiness" }
+          schema:
+            oneOf:
+              - { $ref: "#/components/schemas/ApiError" }
+              - { $ref: "#/components/schemas/Readiness" }
+    BadGateway:
+      description: Upstream Feishu OAuth provider failed
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiError" }
   schemas:
     ApiError:
       type: object
@@ -460,3 +655,117 @@ components:
         sourceAssetId: { type: string }
         sourceEventId: { type: string }
         createdAt: { type: string, format: date-time }
+    FeishuEventResponse:
+      description: >-
+        Feishu webhook response. URL verification returns a challenge. Synchronous
+        events return an acknowledgement; production asynchronous ingress returns
+        the durable inbox id and whether the event was newly queued.
+      oneOf:
+        - type: object
+          required: [challenge]
+          properties:
+            challenge: { type: string }
+        - type: object
+          required: [code, processed]
+          not:
+            required: [queued]
+          properties:
+            code: { type: integer, const: 0 }
+            processed: { type: boolean }
+            reminder: { $ref: "#/components/schemas/Reminder" }
+            notificationSent: { type: boolean, const: true }
+            reason:
+              type: string
+              enum:
+                - unsupported_event
+                - unsupported_message_type
+                - invalid_event_payload
+                - duplicate_event
+                - duplicate_content
+                - command_notifications_unavailable
+                - command_delivery_failed
+                - notification_target_unavailable
+        - type: object
+          required: [code, queued, processed, inboxId]
+          properties:
+            code: { type: integer, const: 0 }
+            queued: { type: boolean, const: true }
+            processed: { type: boolean, const: false }
+            inboxId: { type: string }
+        - type: object
+          required: [code, queued, processed, inboxId, reason]
+          properties:
+            code: { type: integer, const: 0 }
+            queued: { type: boolean, const: false }
+            processed: { type: boolean, const: false }
+            inboxId: { type: string }
+            reason:
+              type: string
+              enum: [duplicate_event, queue_conflict]
+    FeishuOAuthStart:
+      type: object
+      required: [authorizationUrl, stateExpiresAt]
+      properties:
+        authorizationUrl: { type: string, format: uri }
+        stateExpiresAt: { type: string, format: date-time }
+    FeishuInstallation:
+      type: object
+      required: [tenantId, appId, scopes, status, createdAt, updatedAt]
+      properties:
+        tenantId: { type: string }
+        appId: { type: string }
+        tenantName: { type: string }
+        scopes:
+          type: array
+          items: { type: string }
+        openId: { type: string }
+        unionId: { type: string }
+        installedByUserId: { type: string }
+        status: { type: string, enum: [active, revoked] }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        accessTokenExpiresAt: { type: string, format: date-time }
+        refreshTokenExpiresAt: { type: string, format: date-time }
+        revokedAt: { type: string, format: date-time }
+    FeishuOAuthCallback:
+      type: object
+      required: [installation]
+      properties:
+        installation: { $ref: "#/components/schemas/FeishuInstallation" }
+        returnTo: { type: string, pattern: '^/(?!/)' }
+    ConnectorInboxStatusCounts:
+      type: object
+      required: [queued, processing, retrying, completed, dead_letter]
+      additionalProperties: false
+      properties:
+        queued: { type: integer, minimum: 0 }
+        processing: { type: integer, minimum: 0 }
+        retrying: { type: integer, minimum: 0 }
+        completed: { type: integer, minimum: 0 }
+        dead_letter: { type: integer, minimum: 0 }
+    ConnectorOutboxStatusCounts:
+      type: object
+      required: [queued, processing, retrying, sent, dead_letter]
+      additionalProperties: false
+      properties:
+        queued: { type: integer, minimum: 0 }
+        processing: { type: integer, minimum: 0 }
+        retrying: { type: integer, minimum: 0 }
+        sent: { type: integer, minimum: 0 }
+        dead_letter: { type: integer, minimum: 0 }
+    ConnectorQueueStats:
+      type: object
+      required: [inbox, outbox, oldestInboxAvailableAt, oldestOutboxAvailableAt, generatedAt]
+      properties:
+        connector: { type: string }
+        inbox: { $ref: "#/components/schemas/ConnectorInboxStatusCounts" }
+        outbox: { $ref: "#/components/schemas/ConnectorOutboxStatusCounts" }
+        oldestInboxAvailableAt:
+          oneOf:
+            - { type: string, format: date-time }
+            - { type: "null" }
+        oldestOutboxAvailableAt:
+          oneOf:
+            - { type: string, format: date-time }
+            - { type: "null" }
+        generatedAt: { type: string, format: date-time }

@@ -16,6 +16,13 @@ $idempotencyHeaders = $headers.Clone()
 $idempotencyHeaders['idempotency-key'] = "smoke-$([guid]::NewGuid().ToString('N'))"
 
 $health = Invoke-RestMethod -Method Get -Uri "$BaseUrl/health"
+$workbench = Invoke-WebRequest -Method Get -Uri "$BaseUrl/app/"
+if ($workbench.StatusCode -ne 200 -or $workbench.Headers['Content-Type'] -notlike 'text/html*') {
+  throw 'Web workbench shell did not return a healthy HTML response.'
+}
+if ($workbench.Content -match 'AUTH_SECRET|FEISHU_APP_SECRET|LLM_API_KEY') {
+  throw 'Web workbench shell contains a server-secret configuration name.'
+}
 $assetBody = @{
   title = '冒烟测试部署说明'
   content = '部署说明由平台组维护；password=smoke-example-password'
@@ -44,6 +51,7 @@ $answered = Invoke-RestMethod `
 
 [pscustomobject]@{
   health = $health.status
+  workbench = 'ok'
   searchMode = $health.searchMode
   assetCreated = $created.created
   secretFindingCount = $created.asset.secretFindingCount

@@ -12,6 +12,8 @@ export interface VerifyFeishuSignatureOptions {
   toleranceSeconds?: number;
 }
 
+export type FeishuSignedPayload = unknown | string | Buffer;
+
 export class FeishuSignatureError extends Error {
   constructor(message = 'Feishu callback signature verification failed') {
     super(message);
@@ -24,7 +26,7 @@ export class FeishuSignatureError extends Error {
  * sha256(timestamp + nonce + encryptKey + JSON.stringify(payload)).
  */
 export function verifyFeishuSignature(
-  payload: unknown,
+  payload: FeishuSignedPayload,
   headers: FeishuSignatureHeaders,
   options: VerifyFeishuSignatureOptions,
 ): void {
@@ -43,7 +45,7 @@ export function verifyFeishuSignature(
     throw new FeishuSignatureError('Feishu callback timestamp is outside the accepted window');
   }
 
-  const serialized = JSON.stringify(payload);
+  const serialized = serializeSignedPayload(payload);
   if (!serialized) throw new FeishuSignatureError();
   const expected = createHash('sha256')
     .update(timestamp + nonce + options.encryptKey + serialized)
@@ -52,6 +54,13 @@ export function verifyFeishuSignature(
   if (received.length !== expected.length || !timingSafeEqual(received, expected)) {
     throw new FeishuSignatureError();
   }
+}
+
+function serializeSignedPayload(payload: FeishuSignedPayload): string | null {
+  if (typeof payload === 'string') return payload;
+  if (Buffer.isBuffer(payload)) return payload.toString('utf8');
+  const serialized = JSON.stringify(payload);
+  return serialized ?? null;
 }
 
 function required(value: string | undefined): string {

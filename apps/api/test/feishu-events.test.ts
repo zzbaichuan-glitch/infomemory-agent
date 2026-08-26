@@ -125,6 +125,109 @@ describe('Feishu callback foundation', () => {
     expect(reminders.json().reminders).toHaveLength(1);
   });
 
+  it('normalizes rich-text post messages into a safe memory record', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/connectors/feishu/events',
+      payload: eventPayload({
+        eventId: 'post-message-1',
+        messageId: 'post-message-id-1',
+        messageType: 'post',
+        content: richPostContent([
+          '项目部署说明：演示环境由知澜团队维护。',
+          '发布负责人是王小明。',
+        ]),
+      }),
+    });
+    const assets = await app.inject({
+      method: 'GET',
+      url: '/v1/assets',
+      headers: { 'x-tenant-id': 'tenant-key-1', 'x-user-id': 'open-id-1' },
+    });
+
+    expect(response.json()).toMatchObject({ code: 0, processed: true });
+    expect(assets.json().assets).toHaveLength(1);
+    expect(assets.json().assets[0]).toMatchObject({
+      redactedContent: '项目部署说明：演示环境由知澜团队维护。\n发布负责人是王小明。',
+    });
+  });
+
+  it('deduplicates a redelivery that has a new event_id but the same message_id', async () => {
+    const first = await app.inject({
+      method: 'POST',
+      url: '/v1/connectors/feishu/events',
+      payload: eventPayload({
+        eventId: 'delivery-1',
+        messageId: 'stable-message-1',
+        text: '明天 14:30 开会讨论上线方案。',
+      }),
+    });
+    const redelivery = await app.inject({
+      method: 'POST',
+      url: '/v1/connectors/feishu/events',
+      payload: eventPayload({
+        eventId: 'delivery-2',
+        messageId: 'stable-message-1',
+        text: '明天 14:30 开会讨论上线方案。',
+      }),
+    });
+    const assets = await app.inject({
+      method: 'GET',
+      url: '/v1/assets',
+      headers: { 'x-tenant-id': 'tenant-key-1', 'x-user-id': 'open-id-1' },
+    });
+    const reminders = await app.inject({
+      method: 'GET',
+      url: '/v1/reminders',
+      headers: { 'x-tenant-id': 'tenant-key-1', 'x-user-id': 'open-id-1' },
+    });
+
+    expect(first.json()).toMatchObject({ code: 0, processed: true });
+    expect(redelivery.json()).toMatchObject({
+      code: 0,
+      processed: false,
+      reason: 'duplicate_event',
+    });
+    expect(assets.json().assets).toHaveLength(1);
+    expect(reminders.json().reminders).toHaveLength(1);
+    expect(messenger.sendText).toHaveBeenCalledOnce();
+  });
+
+  it('stores a message but never sends or schedules a reminder without open_id', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/connectors/feishu/events',
+      payload: eventPayload({
+        eventId: 'missing-open-id-event',
+        messageId: 'missing-open-id-message',
+        text: '明天 14:30 开会讨论上线方案。',
+        senderId: { union_id: 'union-id-1', user_id: 'user-id-1' },
+      }),
+    });
+    const assets = await app.inject({
+      method: 'GET',
+      url: '/v1/assets',
+      headers: { 'x-tenant-id': 'tenant-key-1', 'x-user-id': 'union-id-1' },
+    });
+    const reminders = await app.inject({
+      method: 'GET',
+      url: '/v1/reminders',
+      headers: { 'x-tenant-id': 'tenant-key-1', 'x-user-id': 'union-id-1' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      code: 0,
+      processed: true,
+      reason: 'notification_target_unavailable',
+    });
+    expect(messenger.sendText).not.toHaveBeenCalled();
+    expect(assets.json().assets).toHaveLength(1);
+    // A scheduled reminder would later be picked up by the Feishu notifier,
+    // which only accepts open_id. It must not be created for this event.
+    expect(reminders.json().reminders).toHaveLength(0);
+  });
+
   it('does not store unsupported message types', async () => {
     const response = await app.inject({
       method: 'POST',
@@ -197,6 +300,41 @@ describe('Feishu callback foundation', () => {
     expect(assets.json().assets).toHaveLength(1);
   });
 
+  it('executes search commands sent as rich-text posts', async () => {
+    await app.inject({
+      method: 'POST',
+      url: '/v1/assets',
+      headers: {
+        'x-tenant-id': 'tenant-key-1',
+        'x-user-id': 'open-id-1',
+        'idempotency-key': 'seed-post-command-search',
+      },
+      payload: {
+        title: '部署说明',
+        content: '演示环境由知澜团队维护。',
+        visibility: 'owner',
+      },
+    });
+    messenger.sendText.mockClear();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/connectors/feishu/events',
+      payload: eventPayload({
+        eventId: 'post-search-1',
+        messageId: 'post-search-message-1',
+        messageType: 'post',
+        content: richPostContent(['搜索 部署']),
+      }),
+    });
+
+    expect(response.json()).toMatchObject({ code: 0, processed: true, notificationSent: true });
+    expect(messenger.sendText).toHaveBeenCalledWith(
+      'open-id-1',
+      expect.stringContaining('[S1] 部署说明'),
+    );
+  });
+
   it('derives asset and reminder metadata only from redacted text', async () => {
     const response = await app.inject({
       method: 'POST',
@@ -224,9 +362,12 @@ describe('Feishu callback foundation', () => {
 
 function eventPayload(options: {
   eventId?: string;
+  messageId?: string;
   eventType?: string;
   messageType?: string;
   text?: string;
+  content?: string;
+  senderId?: Record<string, string>;
 } = {}): Record<string, unknown> {
   return {
     schema: '2.0',
@@ -237,16 +378,23 @@ function eventPayload(options: {
       token: 'expected-token',
     },
     event: {
-      sender: {
-        sender_id: { open_id: 'open-id-1' },
-      },
+      sender: { sender_id: options.senderId ?? { open_id: 'open-id-1' } },
       message: {
-        message_id: 'message-id-1',
+        message_id: options.messageId ?? 'message-id-1',
         chat_id: 'chat-id-1',
         chat_type: 'p2p',
         message_type: options.messageType ?? 'text',
-        content: JSON.stringify({ text: options.text ?? '请保存星海项目的部署结论。' }),
+        content: options.content ?? JSON.stringify({ text: options.text ?? '请保存星海项目的部署结论。' }),
       },
     },
   };
+}
+
+function richPostContent(lines: string[]): string {
+  return JSON.stringify({
+    zh_cn: {
+      title: '',
+      content: lines.map((text) => [{ tag: 'text', text }]),
+    },
+  });
 }

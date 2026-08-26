@@ -8,6 +8,10 @@ describe('application configuration', () => {
 
     expect(config.feishuNotificationsEnabled).toBe(false);
     expect(config.feishuApiBaseUrl).toBe('https://open.feishu.cn');
+    expect(config.feishuOAuthEnabled).toBe(false);
+    expect(config.feishuOAuthStateTtlMs).toBe(600_000);
+    expect(config.feishuOAuthAuthorizationBaseUrl).toBe('https://accounts.feishu.cn');
+    expect(config.feishuOAuthTokenUrl).toBe('https://accounts.feishu.cn/oauth/v3/token');
     expect(config.reminderPollIntervalMs).toBe(15_000);
     expect(config).toMatchObject({
       httpBodyLimitBytes: 4 * 1_024 * 1_024,
@@ -21,6 +25,35 @@ describe('application configuration', () => {
     expect(() => loadAppConfig({
       FEISHU_NOTIFICATIONS_ENABLED: 'true',
     })).toThrow('FEISHU_APP_ID');
+  });
+
+  it('rejects encrypted Feishu webhooks without a verification token', () => {
+    expect(() => loadAppConfig({
+      FEISHU_ENCRYPT_KEY: 'webhook-encryption-key',
+    })).toThrow('FEISHU_VERIFICATION_TOKEN');
+  });
+
+  it('requires a verification token for configured Feishu clients or async ingress', () => {
+    expect(() => loadAppConfig({
+      FEISHU_APP_ID: 'cli_test',
+      FEISHU_APP_SECRET: 'app-secret',
+    })).toThrow('FEISHU_VERIFICATION_TOKEN');
+    expect(() => loadAppConfig({
+      CONNECTOR_PROCESSING_MODE: 'async',
+    })).toThrow('FEISHU_VERIFICATION_TOKEN');
+  });
+
+  it('allows OAuth-only setup without enabling webhook ingress', () => {
+    expect(loadAppConfig({
+      FEISHU_OAUTH_ENABLED: 'true',
+      FEISHU_APP_ID: 'cli_test',
+      FEISHU_APP_SECRET: 'app-secret',
+      FEISHU_OAUTH_REDIRECT_URI: 'https://app.example.test/feishu/callback',
+      FEISHU_TOKEN_ENCRYPTION_KEY: '0123456789abcdef0123456789abcdef',
+    })).toMatchObject({
+      feishuOAuthEnabled: true,
+      connectorProcessingMode: 'sync',
+    });
   });
 
   it('forbids trusted development headers in production', () => {
@@ -83,5 +116,38 @@ describe('application configuration', () => {
       FEISHU_APP_SECRET: 'app-secret',
       FEISHU_API_BASE_URL: 'http://open.feishu.cn',
     })).toThrow('FEISHU_API_BASE_URL');
+  });
+
+  it('requires an exact callback and encryption key for Feishu OAuth', () => {
+    expect(() => loadAppConfig({ FEISHU_OAUTH_ENABLED: 'true' }))
+      .toThrow('FEISHU_APP_ID');
+    expect(() => loadAppConfig({
+      FEISHU_OAUTH_ENABLED: 'true',
+      FEISHU_APP_ID: 'cli_test',
+      FEISHU_APP_SECRET: 'synthetic-secret',
+      FEISHU_OAUTH_REDIRECT_URI: 'https://app.example.test/feishu/callback',
+    })).toThrow('FEISHU_TOKEN_ENCRYPTION_KEY');
+    const config = loadAppConfig({
+      FEISHU_OAUTH_ENABLED: 'true',
+      FEISHU_APP_ID: 'cli_test',
+      FEISHU_APP_SECRET: 'synthetic-secret',
+      FEISHU_OAUTH_REDIRECT_URI: 'https://app.example.test/feishu/callback',
+      FEISHU_TOKEN_ENCRYPTION_KEY: '01234567890123456789012345678901',
+    });
+    expect(config).toMatchObject({
+      feishuOAuthEnabled: true,
+      feishuOAuthRedirectUri: 'https://app.example.test/feishu/callback',
+      feishuTokenEncryptionKey: '01234567890123456789012345678901',
+      feishuOAuthAuthorizationBaseUrl: 'https://accounts.feishu.cn',
+      feishuOAuthTokenUrl: 'https://accounts.feishu.cn/oauth/v3/token',
+    });
+    expect(() => loadAppConfig({
+      NODE_ENV: 'production',
+      FEISHU_OAUTH_ENABLED: 'true',
+      FEISHU_APP_ID: 'cli_test',
+      FEISHU_APP_SECRET: 'synthetic-secret',
+      FEISHU_OAUTH_REDIRECT_URI: 'http://app.example.test/feishu/callback',
+      FEISHU_TOKEN_ENCRYPTION_KEY: '01234567890123456789012345678901',
+    })).toThrow('FEISHU_OAUTH_REDIRECT_URI');
   });
 });

@@ -27,7 +27,7 @@ describe('health probes', () => {
     });
   });
 
-  it('does not expose capability configuration from production health', async () => {
+  it('exposes only non-sensitive connector availability from production health', async () => {
     app = await buildApp({
       nodeEnv: 'production',
       authentication: {
@@ -43,7 +43,24 @@ describe('health probes', () => {
     expect(response.json()).toEqual({
       status: 'ok',
       service: 'infomemory-api',
-      version: '0.2.0',
+      version: '0.3.0',
+      connectorCapabilities: { feishuOAuthInstallation: false },
     });
+  });
+
+  it('reports Feishu OAuth installation availability without exposing credentials', async () => {
+    app = await buildApp({
+      feishuOAuth: {
+        appId: 'cli_health_test',
+        appSecret: 'synthetic-health-secret',
+        redirectUri: 'https://app.infomemory.test/v1/connectors/feishu/oauth/callback',
+        tokenEncryptionKey: '01234567890123456789012345678901',
+      },
+    });
+
+    const response = await app.inject({ method: 'GET', url: '/health' });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().connectorCapabilities).toEqual({ feishuOAuthInstallation: true });
+    expect(response.body).not.toContain('synthetic-health-secret');
   });
 });

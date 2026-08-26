@@ -8,8 +8,10 @@ describe('decodeFeishuPayload', () => {
   it('decrypts Feishu AES-256-CBC event payloads', () => {
     const keyText = 'test-encrypt-key';
     const key = createHash('sha256').update(keyText).digest();
-    const cipher = createCipheriv('aes-256-cbc', key, key.subarray(0, 16));
+    const iv = Buffer.alloc(16, 7);
+    const cipher = createCipheriv('aes-256-cbc', key, iv);
     const encrypted = Buffer.concat([
+      iv,
       cipher.update(JSON.stringify({ type: 'url_verification', challenge: 'ok' }), 'utf8'),
       cipher.final(),
     ]).toString('base64');

@@ -42,13 +42,39 @@ const app = await buildApp({
   ...(config.feishuVerificationToken
     ? { feishuVerificationToken: config.feishuVerificationToken }
     : {}),
+  feishuOAuthConfigured: config.feishuOAuthEnabled,
   ...(config.feishuEncryptKey ? { feishuEncryptKey: config.feishuEncryptKey } : {}),
   ...(feishuClient ? { feishuMessenger: feishuClient } : {}),
+  ...(config.feishuOAuthEnabled && config.feishuAppId && config.feishuAppSecret
+    && config.feishuOAuthRedirectUri && config.feishuTokenEncryptionKey
+    ? {
+      feishuOAuth: {
+        appId: config.feishuAppId,
+        appSecret: config.feishuAppSecret,
+        redirectUri: config.feishuOAuthRedirectUri,
+        baseUrl: config.feishuApiBaseUrl,
+        authorizationBaseUrl: config.feishuOAuthAuthorizationBaseUrl,
+        tokenEndpoint: config.feishuOAuthTokenUrl,
+        scopes: config.feishuOAuthScopes,
+        tokenEncryptionKey: config.feishuTokenEncryptionKey,
+        stateTtlMs: config.feishuOAuthStateTtlMs,
+        timeoutMs: config.feishuApiTimeoutMs,
+      },
+    }
+    : {}),
   ...(feishuClient
     ? { reminderNotifier: createReminderNotifier(feishuClient, config.appTimeZone) }
     : {}),
   reminderWorkerEnabled: Boolean(feishuClient),
   reminderPollIntervalMs: config.reminderPollIntervalMs,
+  feishuProcessingMode: config.connectorProcessingMode,
+  connectorWorkerEnabled: config.connectorWorkerEnabled,
+  connectorWorkerIntervalMs: config.connectorWorkerIntervalMs,
+  connectorWorkerBatchSize: config.connectorWorkerBatchSize,
+  connectorWorkerLeaseMs: config.connectorWorkerLeaseMs,
+  connectorMaxAttempts: config.connectorMaxAttempts,
+  connectorBackoffBaseMs: config.connectorBackoffBaseMs,
+  connectorBackoffMaxMs: config.connectorBackoffMaxMs,
 });
 
 const shutdown = async (signal: string): Promise<void> => {
