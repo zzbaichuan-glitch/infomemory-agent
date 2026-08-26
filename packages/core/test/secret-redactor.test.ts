@@ -47,6 +47,11 @@ describe('redactSecrets', () => {
     });
   });
 
+  it('is idempotent for its own redaction markers', () => {
+    const input = 'password=[REDACTED:password] Bearer [REDACTED:bearer_token]';
+    expect(redactSecrets(input)).toEqual({ redactedText: input, findings: [] });
+  });
+
   it('redacts multiple non-overlapping findings deterministically', () => {
     const apiKey = ['sk', 'anotherExample1234567890ABCDEF'].join('-');
     const input = `api_key=${apiKey}; pwd=another-password`;
@@ -88,5 +93,23 @@ describe('redactSecrets', () => {
     expect(result.redactedText).toContain('[REDACTED:private_key]');
     expect(JSON.stringify(result)).not.toContain('bWF0ZXJpYWw');
     expect(JSON.stringify(result)).not.toContain(appSecret.slice(-4));
+  });
+
+  it('redacts common cloud and OAuth assignment names', () => {
+    const input = [
+      'AWS_SECRET_ACCESS_KEY=aws-secret-value',
+      'AccountKey=account-secret-value',
+      'refreshToken=refresh-secret-value',
+      'AWS_SESSION_TOKEN=session-secret-value',
+    ].join('\n');
+
+    const result = redactSecrets(input);
+
+    expect(result.redactedText).not.toContain('aws-secret-value');
+    expect(result.redactedText).not.toContain('account-secret-value');
+    expect(result.redactedText).not.toContain('refresh-secret-value');
+    expect(result.redactedText).not.toContain('session-secret-value');
+    expect(result.findings).toHaveLength(4);
+    expect(result.findings.every((finding) => finding.type === 'password')).toBe(true);
   });
 });

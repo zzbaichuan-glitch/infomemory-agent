@@ -51,6 +51,12 @@ describe('application configuration', () => {
 
   it('rejects incomplete bearer credentials and invalid IANA time zones', () => {
     expect(() => loadAppConfig({ AUTH_MODE: 'bearer' })).toThrow('AUTH_SECRET');
+    expect(() => loadAppConfig({
+      AUTH_MODE: 'bearer',
+      AUTH_SECRET: ' '.repeat(64),
+      AUTH_ISSUER: 'infomemory-agent',
+      AUTH_AUDIENCE: 'infomemory-api',
+    })).toThrow('AUTH_SECRET');
     expect(() => loadAppConfig({ APP_TIMEZONE: 'Mars/Olympus_Mons' })).toThrow('APP_TIMEZONE');
   });
 

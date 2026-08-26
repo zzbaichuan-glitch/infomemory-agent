@@ -183,7 +183,7 @@ function validateClaims(value: Record<string, unknown>): AccessTokenClaims {
 function validateSecret(value: string): Buffer {
   if (typeof value !== 'string') throw new AccessTokenError('Access token secret is invalid');
   const secret = Buffer.from(value, 'utf8');
-  if (secret.length < MINIMUM_SECRET_BYTES) {
+  if (value.trim().length === 0 || secret.length < MINIMUM_SECRET_BYTES) {
     throw new AccessTokenError('Access token secret must contain at least 32 bytes');
   }
   return secret;

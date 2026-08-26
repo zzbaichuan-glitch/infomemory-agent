@@ -10,6 +10,7 @@ import type {
   AssetRepository,
 } from '../repositories/asset-repository.js';
 import { redactSecrets } from '../security/secret-redactor.js';
+import { sanitizeSourceReference } from '../security/metadata-sanitizer.js';
 
 const sourceSchema = z.object({
   type: z.enum(['manual', 'local_file', 'feishu_message', 'feishu_document']),
@@ -78,14 +79,23 @@ export class AssetService {
     const contentHash = createHash('sha256')
       .update(safeContent.redactedText, 'utf8')
       .digest('hex');
-    const requestFingerprint = createHash('sha256')
+    // Keep the request digest private and content-sensitive. Hashing only the
+    // redacted payload would make two different secret values look identical
+    // under one idempotency key. The raw values are never persisted.
+    const requestFingerprint = `v2:${createHash('sha256')
       .update(JSON.stringify({
-        title: safeTitle.redactedText,
-        content: safeContent.redactedText,
+        title: command.title.normalize('NFKC'),
+        content: command.content,
         visibility: command.visibility,
-        source: safeSource.source,
+        source: command.source
+          ? {
+            type: command.source.type,
+            externalId: command.source.externalId,
+            url: command.source.url,
+          }
+          : undefined,
       }), 'utf8')
-      .digest('hex');
+      .digest('hex')}`;
 
     return this.repository.ingest({
       id: this.#idFactory(),
@@ -140,69 +150,14 @@ export class AssetService {
   } {
     if (!source) return { source: { type: 'manual' }, findingCount: 0 };
     const externalId = source.externalId
-      ? redactSecrets(source.externalId.normalize('NFKC'))
+      ? source.externalId
       : undefined;
-    const url = source.url ? sanitizeSourceUrl(source.url) : undefined;
-    return {
-      source: {
-        type: source.type,
-        ...(externalId ? { externalId: externalId.redactedText } : {}),
-        ...(url ? { url: url.value } : {}),
-      },
-      findingCount: (externalId?.findings.length ?? 0) + (url?.findingCount ?? 0),
-    };
-  }
-}
-
-const SENSITIVE_URL_PARAMETER = /(?:^|[_-])(?:access[_-]?token|auth|authorization|code|credential|key|password|passwd|pwd|secret|sig|signature|token)(?:$|[_-])/i;
-
-function sanitizeSourceUrl(input: string): { value: string; findingCount: number } {
-  const url = new URL(input);
-  let findingCount = 0;
-  if (url.username) {
-    url.username = '';
-    findingCount += 1;
-  }
-  if (url.password) {
-    url.password = '';
-    findingCount += 1;
-  }
-
-  url.pathname = url.pathname
-    .split('/')
-    .map((segment) => {
-      if (!segment) return segment;
-      const decoded = safeDecode(segment);
-      const redaction = redactSecrets(decoded);
-      if (redaction.findings.length === 0) return segment;
-      findingCount += redaction.findings.length;
-      return 'REDACTED';
-    })
-    .join('/');
-
-  for (const [name, value] of Array.from(url.searchParams.entries())) {
-    const redaction = redactSecrets(value);
-    if (SENSITIVE_URL_PARAMETER.test(name) || redaction.findings.length > 0) {
-      findingCount += Math.max(1, redaction.findings.length);
-      url.searchParams.set(name, 'REDACTED');
-    }
-  }
-
-  if (url.hash) {
-    const redaction = redactSecrets(safeDecode(url.hash.slice(1)));
-    if (redaction.findings.length > 0 || /(?:access[_-]?token|code|credential|password|secret|token)=/i.test(url.hash)) {
-      findingCount += Math.max(1, redaction.findings.length);
-      url.hash = 'REDACTED';
-    }
-  }
-
-  return { value: url.toString(), findingCount };
-}
-
-function safeDecode(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
+    // Keep source normalization in one place so legacy migration and new writes
+    // cannot diverge on URL credentials or sensitive identifiers.
+    return sanitizeSourceReference({
+      type: source.type,
+      ...(externalId ? { externalId } : {}),
+      ...(source.url ? { url: source.url } : {}),
+    });
   }
 }

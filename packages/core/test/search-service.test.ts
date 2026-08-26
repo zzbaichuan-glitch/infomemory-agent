@@ -97,6 +97,20 @@ describe('SearchService', () => {
     expect(result.query).not.toContain('synthetic-search-secret');
   });
 
+  it('supports a single-character Chinese query without a full-table scan', async () => {
+    await assets.ingest(alice, {
+      title: '会议安排',
+      content: '明天开会，请项目负责人参加。',
+      idempotencyKey: 'single-character-query',
+      visibility: 'tenant',
+    });
+
+    const result = await search.search(alice, { query: '会' });
+
+    expect(result.evidence).toHaveLength(1);
+    expect(result.evidence[0]?.title).toBe('会议安排');
+  });
+
   it('finds an older matching asset after more than 500 newer assets exist', async () => {
     const oldest = await assets.ingest(alice, {
       title: '远古唯一关键词档案',

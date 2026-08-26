@@ -37,6 +37,16 @@ describe('ReminderService', () => {
     await expect(service.list({ tenantId: 'tenant-b', userId: 'bob' })).resolves.toEqual([]);
   });
 
+  it('redacts secrets before deriving an observed reminder title', async () => {
+    const reminder = await service.observeMessage(context, {
+      text: '明天 14:30 开会讨论上线方案，password=observed-secret。',
+      sourceEventId: 'event-secret-title',
+    });
+
+    expect(reminder?.title).toContain('[REDACTED:password]');
+    expect(reminder?.title).not.toContain('observed-secret');
+  });
+
   it('persists default Asia/Shanghai instants independently of the process time zone', async () => {
     const reminder = await service.observeMessage(context, {
       text: '明天 14:30 开会讨论上线方案。',

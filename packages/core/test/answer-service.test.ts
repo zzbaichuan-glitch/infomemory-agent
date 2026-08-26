@@ -120,6 +120,21 @@ describe('AnswerService', () => {
     expect(input.query).toContain('[REDACTED:password]');
   });
 
+  it('rejects an uncited English claim after a cited sentence', async () => {
+    await seedEvidence();
+    const service = new AnswerService(search, {
+      generate: vi.fn().mockResolvedValue(
+        'The platform team owns the database configuration. [S1] The password is rotated weekly.',
+      ),
+    });
+
+    await expect(service.answer(alice, { query: '数据库配置' }))
+      .resolves.toMatchObject({
+        status: 'evidence_only',
+        degradedReason: 'missing_citations',
+      });
+  });
+
   async function seedEvidence(): Promise<void> {
     await assets.ingest(alice, {
       title: '数据库配置说明',

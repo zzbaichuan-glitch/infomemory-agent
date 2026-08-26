@@ -40,6 +40,7 @@ export interface ReminderRepository {
     context: AccessContext,
     id: string,
     status: ReminderStatus,
+    expectedStatus?: ReminderStatus,
   ): Promise<Reminder | null>;
 }
 

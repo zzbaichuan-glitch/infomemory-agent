@@ -95,6 +95,14 @@ describe('HS256 access tokens', () => {
         audience: 'infomemory-api',
       },
     })).rejects.toThrow('32 to 4096 bytes');
+    await expect(buildApp({
+      authentication: {
+        mode: 'bearer',
+        secret: ' '.repeat(64),
+        issuer: 'https://auth.infomemory.test',
+        audience: 'infomemory-api',
+      },
+    })).rejects.toThrow('32 to 4096 bytes');
   });
 
   it('returns a stable 401 response when a bearer token is missing', async () => {

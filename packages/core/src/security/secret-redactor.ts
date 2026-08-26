@@ -37,7 +37,7 @@ const JWT_PATTERN = /\beyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]
 const BEARER_PATTERN = /\bBearer\s+([A-Za-z0-9._~+/=-]{16,})/gi;
 const BASIC_AUTH_PATTERN = /\bBasic\s+([A-Za-z0-9+/=]{12,})/gi;
 const PASSWORD_ASSIGNMENT_PATTERN =
-  /(?:^|[^\p{L}\p{N}_])(?:"?(?:(?:[a-z][a-z0-9]*[_-])*(?:password|passwd|pwd|api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|app[_-]?secret|secret|token)|密码|密钥|令牌)"?)\s*[:=]\s*["']?([^\s,;"']{4,})["']?/gimu;
+  /(?:^|[^\p{L}\p{N}_])(?:"?(?:(?:[a-z][a-z0-9]*[_-])*(?:password|passwd|pwd|api[_-]?key|access[_-]?(?:token|key)|auth[_-]?(?:token|key)|account[_-]?key|refresh[_-]?token|session[_-]?token|id[_-]?token|signing[_-]?key|encryption[_-]?key|client[_-]?secret|app[_-]?secret|secret[_-]?key|secret|token)|密码|密钥|令牌)"?)\s*[:=]\s*["']?([^\s,;"']{4,})["']?/gimu;
 const DATABASE_URL_PATTERN =
   /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|mssql):\/\/[^:\s/@]+:([^@\s/]+)@/gi;
 const PRIVATE_KEY_PATTERN =
@@ -68,6 +68,10 @@ function collectCapturedMatches(
   for (const match of input.matchAll(pattern)) {
     const captured = match[1];
     if (!captured) continue;
+    // Redaction is intentionally idempotent. Legacy migrations and repeated
+    // normalization may see an existing marker; do not count or rewrite it as
+    // a new secret finding.
+    if (/^\[REDACTED:[a-z_]+\]$/u.test(captured)) continue;
 
     const offsetInMatch = match[0].lastIndexOf(captured);
     if (offsetInMatch < 0) continue;

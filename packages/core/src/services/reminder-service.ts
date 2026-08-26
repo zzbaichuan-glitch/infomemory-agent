@@ -5,6 +5,7 @@ import { z } from 'zod';
 import type { AccessContext, Reminder, ReminderStatus } from '../domain.js';
 import type { ReminderRepository } from '../repositories/reminder-repository.js';
 import { redactSecrets } from '../security/secret-redactor.js';
+import { sanitizeContent, sanitizeTitle } from '../security/metadata-sanitizer.js';
 import {
   DEFAULT_MEETING_TIME_ZONE,
   extractMeetingReminder,
@@ -86,6 +87,7 @@ export class ReminderService {
   ): Promise<Reminder | null> {
     const context = accessContextSchema.parse(contextInput);
     const text = z.string().trim().min(1).max(1_000_000).parse(observation.text);
+    const safeText = sanitizeContent(text).value;
     if (observation.sourceEventId) {
       const existing = await this.repository.findReminderBySourceEvent(
         context,
@@ -93,11 +95,15 @@ export class ReminderService {
       );
       if (existing) return existing;
     }
-    const candidate = extractMeetingReminder(text, this.#now(), {
+    const candidate = extractMeetingReminder(safeText, this.#now(), {
       timeZone: this.#timeZone,
     });
     if (!candidate) return null;
-    return this.#persistCandidate(context, candidate, observation);
+    return this.#persistCandidate(context, {
+      ...candidate,
+      title: sanitizeTitle(candidate.title).value,
+      matchedText: sanitizeContent(candidate.matchedText).value,
+    }, observation);
   }
 
   async list(
@@ -186,7 +192,19 @@ export class ReminderService {
     if (!ALLOWED_STATUS_TRANSITIONS[current.status].includes(nextStatus)) {
       throw new InvalidReminderTransitionError(current.status, nextStatus);
     }
-    return this.repository.updateReminderStatus(context, id, nextStatus);
+    // Compare-and-set in the repository closes the read/modify/write race
+    // between concurrent terminal transitions. If another worker won first,
+    // re-read the row and report the real transition that is now invalid.
+    const updated = await this.repository.updateReminderStatus(
+      context,
+      id,
+      nextStatus,
+      current.status,
+    );
+    if (updated) return updated;
+    const latest = await this.repository.findReminder(context, id);
+    if (!latest || latest.status === nextStatus) return latest;
+    throw new InvalidReminderTransitionError(latest.status, nextStatus);
   }
 
   #persistCandidate(

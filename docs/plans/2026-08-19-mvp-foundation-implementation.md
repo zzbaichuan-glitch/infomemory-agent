@@ -1,5 +1,10 @@
 # InfoMemory MVP Foundation Implementation Plan
 
+> Historical plan. The v0.2.0 implementation on `main` has since added Bearer
+> authentication, metadata redaction, SQLite FTS5, reminders, Feishu outbound
+> text, Docker/CI and the acceptance runner. Any earlier “not implemented” notes
+> below describe the superseded milestone; see the [v0.2 design](2026-08-23-v0.2-secure-usability-design.md).
+
 > **For Claude:** REQUIRED SUB-SKILL: Use `executing-plans` to implement this plan task-by-task.
 
 **Goal:** Build the first runnable, security-first vertical slice for InfoMemory: ingest text, redact secrets, enforce tenant/user visibility, search evidence, generate citation-backed answers through an optional OpenAI-compatible gateway, and accept idempotent Feishu callbacks.

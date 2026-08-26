@@ -16,6 +16,9 @@ const optionalAuthSecret = z.preprocess(
   (value) => typeof value === 'string' && value === '' ? undefined : value,
   z.string()
     .max(4_096)
+    .refine((value) => value.trim().length > 0, {
+      message: 'AUTH_SECRET must not be blank',
+    })
     .refine((value) => Buffer.byteLength(value, 'utf8') >= 32, {
       message: 'AUTH_SECRET must contain at least 32 bytes',
     })

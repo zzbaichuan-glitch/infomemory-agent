@@ -120,7 +120,7 @@ export function validateAuthenticationOptions(options: AuthenticationOptions): v
   }
   if (options.mode === 'bearer') {
     const secretBytes = Buffer.byteLength(options.secret, 'utf8');
-    if (secretBytes < 32 || secretBytes > 4_096) {
+    if (options.secret.trim().length === 0 || secretBytes < 32 || secretBytes > 4_096) {
       throw new AuthenticationConfigurationError(
         'bearer authentication requires a secret containing 32 to 4096 bytes',
       );

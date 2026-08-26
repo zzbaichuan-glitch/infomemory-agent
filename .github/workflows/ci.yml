@@ -54,3 +54,42 @@ jobs:
 
       - name: Audit locked dependencies
         run: npm audit --audit-level=high --registry=https://registry.npmjs.org
+
+  docker-build:
+    name: Linux Docker build and readiness smoke
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Build the production image
+        run: docker build --tag infomemory-agent:ci .
+
+      - name: Start the production container
+        run: |
+          docker run --detach --name infomemory-agent-ci \
+            --publish 3000:3000 \
+            --env AUTH_SECRET=ci-only-secret-with-at-least-32-bytes-long \
+            --env AUTH_ISSUER=infomemory-agent-ci \
+            --env AUTH_AUDIENCE=infomemory-api \
+            infomemory-agent:ci
+
+      - name: Wait for readiness
+        run: |
+          for attempt in {1..30}; do
+            status="$(docker inspect --format='{{.State.Health.Status}}' infomemory-agent-ci 2>/dev/null || true)"
+            if [ "$status" = "healthy" ]; then exit 0; fi
+            if [ "$status" = "unhealthy" ]; then
+              docker logs infomemory-agent-ci
+              exit 1
+            fi
+            sleep 1
+          done
+          docker logs infomemory-agent-ci
+          exit 1
+
+      - name: Stop the production container
+        if: always()
+        run: docker rm --force infomemory-agent-ci

@@ -91,7 +91,9 @@ function hasGroundedCitations(answer: string, evidenceCount: number): boolean {
 }
 
 function splitClaims(line: string): string[] {
-  const claims = line.match(/[^。！？!?]+(?:[。！？!?](?:\s*\[S\d+\])*)?/gu);
+  // Split both Chinese and Latin sentence punctuation so one citation cannot
+  // accidentally cover several independent English claims on one line.
+  const claims = line.match(/[^。！？!?；;.!?]+(?:[。！？!?；;.!?](?:\s*\[S\d+\])*)?/gu);
   return claims ?? [];
 }
 

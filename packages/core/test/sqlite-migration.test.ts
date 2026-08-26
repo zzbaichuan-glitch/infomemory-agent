@@ -29,18 +29,28 @@ describe('SqliteAssetRepository migrations', () => {
           idFactory: () => 'new-asset',
           now: () => new Date('2026-08-20T00:00:00.000Z'),
         });
+        await expect(assets.ingest(
+          { tenantId: 'tenant-a', userId: 'alice' },
+          {
+            title: '迁移可搜索档案 password=legacy-title-secret',
+            content: '这是一条迁移后仍然可搜索的历史记录。 password=legacy-content-secret',
+            idempotencyKey: 'legacy-key',
+            visibility: 'owner',
+          },
+        )).rejects.toBeInstanceOf(IdempotencyConflictError);
+
         const repeated = await assets.ingest(
           { tenantId: 'tenant-a', userId: 'alice' },
           {
-            title: '迁移可搜索档案',
-            content: '这是一条迁移后仍然可搜索的历史记录。',
-            idempotencyKey: 'legacy-key',
+            title: '迁移可搜索档案 password=legacy-title-secret',
+            content: '这是一条迁移后仍然可搜索的历史记录。 password=legacy-content-secret',
+            idempotencyKey: 'new-key-after-legacy',
             visibility: 'owner',
           },
         );
         expect(repeated).toMatchObject({
           created: false,
-          deduplicatedBy: 'idempotency',
+          deduplicatedBy: 'content_hash',
           asset: { id: 'legacy-asset', ownerId: 'alice' },
         });
         await expect(assets.ingest(
@@ -61,7 +71,7 @@ describe('SqliteAssetRepository migrations', () => {
         const version = migrated.prepare('PRAGMA user_version').get() as { user_version: number };
         const columns = migrated.prepare('PRAGMA table_info(asset_ingestions)').all() as Array<{ name: string }>;
         const assetCount = migrated.prepare('SELECT COUNT(*) AS count FROM assets').get() as { count: number };
-        expect(version.user_version).toBe(4);
+        expect(version.user_version).toBe(5);
         expect(columns.map((column) => column.name)).toEqual(expect.arrayContaining([
           'actor_id',
           'operation',
@@ -69,6 +79,34 @@ describe('SqliteAssetRepository migrations', () => {
           'created_at',
         ]));
         expect(Number(assetCount.count)).toBe(1);
+
+        const asset = migrated.prepare(`
+          SELECT title, redacted_content, secret_finding_count
+          FROM assets WHERE id = 'legacy-asset'
+        `).get() as { title: string; redacted_content: string; secret_finding_count: number };
+        expect(asset.title).toContain('[REDACTED:password]');
+        expect(asset.title).not.toContain('legacy-title-secret');
+        expect(asset.redacted_content).toContain('[REDACTED:password]');
+        expect(asset.redacted_content).not.toContain('legacy-content-secret');
+        expect(Number(asset.secret_finding_count)).toBeGreaterThanOrEqual(2);
+
+        const source = migrated.prepare(`
+          SELECT source_identity, external_id, source_url
+          FROM asset_sources
+          WHERE asset_id = 'legacy-asset' AND external_id IS NOT NULL
+          ORDER BY source_identity ASC
+          LIMIT 1
+        `).get() as { source_identity: string; external_id: string; source_url: string };
+        expect(source.source_identity).not.toContain('legacy-source-secret');
+        expect(source.external_id).toBe('password=[REDACTED:password]');
+        expect(source.source_url).toContain('token=REDACTED');
+        expect(source.source_url).not.toContain('legacy-source-secret');
+
+        const reminder = migrated.prepare(`
+          SELECT title FROM reminders WHERE id = 'legacy-reminder'
+        `).get() as { title: string };
+        expect(reminder.title).toBe('提醒 password=[REDACTED:password]');
+        expect(reminder.title).not.toContain('legacy-reminder-secret');
       } finally {
         migrated.close();
       }
@@ -112,13 +150,40 @@ function seedLegacyDatabase(path: string): void {
         id, tenant_id, owner_id, visibility, title, redacted_content,
         content_hash, secret_finding_count, created_at
       ) VALUES (
-        'legacy-asset', 'tenant-a', 'alice', 'owner', '迁移可搜索档案',
-        '这是一条迁移后仍然可搜索的历史记录。', 'legacy-hash', 0,
+        'legacy-asset', 'tenant-a', 'alice', 'owner',
+        '迁移可搜索档案 password=legacy-title-secret',
+        '这是一条迁移后仍然可搜索的历史记录。 password=legacy-content-secret',
+        'legacy-hash', 0,
         '2026-08-19T00:00:00.000Z'
       );
       INSERT INTO asset_sources (
         asset_id, source_identity, source_type, external_id, source_url
-      ) VALUES ('legacy-asset', 'manual::', 'manual', NULL, NULL);
+      ) VALUES (
+        'legacy-asset', 'manual:password=legacy-source-secret:https://legacy.example/path',
+        'manual', 'password=legacy-source-secret',
+        'https://legacy.example/path?access_token=legacy-source-secret'
+      );
+      CREATE TABLE reminders (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        starts_at TEXT NOT NULL,
+        remind_at TEXT NOT NULL,
+        status TEXT NOT NULL,
+        precision TEXT NOT NULL,
+        source_asset_id TEXT,
+        source_event_id TEXT,
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO reminders (
+        id, tenant_id, user_id, title, starts_at, remind_at, status,
+        precision, source_asset_id, source_event_id, created_at
+      ) VALUES (
+        'legacy-reminder', 'tenant-a', 'alice', '提醒 password=legacy-reminder-secret',
+        '2026-08-21T00:00:00.000Z', '2026-08-20T23:30:00.000Z', 'scheduled',
+        'exact', 'legacy-asset', NULL, '2026-08-19T00:00:00.000Z'
+      );
       INSERT INTO asset_ingestions (tenant_id, idempotency_key, asset_id)
       VALUES ('tenant-a', 'legacy-key', 'legacy-asset');
       PRAGMA user_version = 0;

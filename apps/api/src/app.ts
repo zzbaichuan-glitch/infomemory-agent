@@ -59,6 +59,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     mode: 'trusted_headers' as const,
     environment: options.nodeEnv ?? 'development',
   };
+  const rateLimitOptions = options.rateLimit;
   validateAuthenticationOptions(authentication);
   const app = Fastify({
     logger: options.logger ?? false,
@@ -103,7 +104,6 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     repository.close();
   });
   registerErrorHandling(app);
-  if (options.rateLimit !== false) registerRateLimit(app, options.rateLimit);
   registerJsonMediaTypeGuard(app);
 
   registerHealthRoute(app, {
@@ -119,6 +119,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   await app.register(async (secured) => {
     await accessContextPlugin(secured, authentication);
+    // Authentication runs before this preHandler, so product traffic is
+    // bucketed by the verified tenant/user identity rather than a NAT IP.
+    if (rateLimitOptions !== false) registerRateLimit(secured, rateLimitOptions);
     registerAssetRoutes(secured, assetService, repository);
     registerSearchRoute(secured, searchService);
     registerAnswerRoute(secured, answerService);
@@ -126,6 +129,22 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   }, { prefix: '/v1' });
 
   await app.register(async (feishu) => {
+    // Feishu callbacks are intentionally unauthenticated at the HTTP layer;
+    // keep a small IP bucket for this public ingress path.
+    if (rateLimitOptions !== false) {
+      const publicRateLimitOptions: RateLimitOptions = { hook: 'onRequest' };
+      if (rateLimitOptions?.maxRequests !== undefined) {
+        publicRateLimitOptions.maxRequests = rateLimitOptions.maxRequests;
+      }
+      if (rateLimitOptions?.windowMs !== undefined) {
+        publicRateLimitOptions.windowMs = rateLimitOptions.windowMs;
+      }
+      if (rateLimitOptions?.maxKeys !== undefined) {
+        publicRateLimitOptions.maxKeys = rateLimitOptions.maxKeys;
+      }
+      if (rateLimitOptions?.now !== undefined) publicRateLimitOptions.now = rateLimitOptions.now;
+      registerRateLimit(feishu, publicRateLimitOptions);
+    }
     registerFeishuEventRoute(feishu, feishuEvents);
   }, { prefix: '/v1/connectors/feishu' });
 

@@ -9,6 +9,9 @@ export function searchTerms(value: string): string[] {
   const terms = new Set<string>();
   for (const segment of normalized.match(SEGMENT_PATTERN) ?? []) {
     if (/^[\p{Script=Han}]+$/u.test(segment)) {
+      // Keep a single Han character as a short-query fallback. Normal Chinese
+      // text uses bigrams to avoid turning every multi-character query into a
+      // broad OR expression.
       if (segment.length === 1) {
         terms.add(segment);
         continue;
@@ -21,6 +24,10 @@ export function searchTerms(value: string): string[] {
     terms.add(segment);
   }
   return Array.from(terms);
+}
+
+export function isSingleHanTerm(value: string): boolean {
+  return value.length === 1 && /^\p{Script=Han}$/u.test(value);
 }
 
 export function createFtsIndexText(value: string): string {

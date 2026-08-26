@@ -22,6 +22,7 @@
     "verify": "npm run typecheck && npm run test && npm run build",
     "token": "npm run token --workspace @infomemory/api --",
     "agent": "node scripts/zhilan.mjs",
+    "acceptance": "powershell -ExecutionPolicy Bypass -File .\\scripts\\acceptance.ps1",
     "audit:dependencies": "npm audit --audit-level=high --registry=https://registry.npmjs.org"
   },
   "devDependencies": {

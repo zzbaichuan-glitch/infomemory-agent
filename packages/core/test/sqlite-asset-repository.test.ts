@@ -162,4 +162,38 @@ describe('SqliteAssetRepository access boundaries', () => {
       receivedAt: '2026-08-19T00:02:00.000Z',
     });
   });
+
+  it('keeps search scores stable when unauthorized FTS documents are added', async () => {
+    const visible = await service.ingest(
+      { tenantId: 'tenant-a', userId: 'alice' },
+      {
+        title: '侧信道查询目标',
+        content: '授权内容只属于 Alice。',
+        idempotencyKey: 'visible-score',
+        visibility: 'tenant',
+      },
+    );
+    const before = await repository.search(
+      { tenantId: 'tenant-a', userId: 'alice' },
+      '侧信道查询',
+    );
+
+    await service.ingest(
+      { tenantId: 'tenant-b', userId: 'bob' },
+      {
+        title: '侧信道查询 侧信道查询 侧信道查询',
+        content: '未授权租户包含大量相同关键词。',
+        idempotencyKey: 'hidden-score',
+        visibility: 'tenant',
+      },
+    );
+    const after = await repository.search(
+      { tenantId: 'tenant-a', userId: 'alice' },
+      '侧信道查询',
+    );
+
+    expect(before.map((hit) => hit.asset.id)).toEqual([visible.asset.id]);
+    expect(after.map((hit) => hit.asset.id)).toEqual([visible.asset.id]);
+    expect(after[0]?.score).toBe(before[0]?.score);
+  });
 });

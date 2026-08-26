@@ -8,6 +8,7 @@ export interface RateLimitOptions {
   maxKeys?: number;
   now?: () => number;
   keyGenerator?: (request: FastifyRequest) => string;
+  hook?: 'onRequest' | 'preHandler';
 }
 
 interface RateLimitEntry {
@@ -48,7 +49,17 @@ export class InMemoryRateLimiter {
     }
     let entry = this.#entries.get(key);
     if (!entry || entry.resetAt <= now) {
-      this.#ensureCapacity(now);
+      if (entry) this.#entries.delete(key);
+      if (!this.#ensureCapacity(now)) {
+        const resetAt = this.#nextResetAt(now);
+        return {
+          allowed: false,
+          limit: this.#maxRequests,
+          remaining: 0,
+          resetAt,
+          retryAfterSeconds: Math.max(1, Math.ceil((resetAt - now) / 1_000)),
+        };
+      }
       entry = { count: 0, resetAt: now + this.#windowMs };
       this.#entries.set(key, entry);
     }
@@ -64,14 +75,20 @@ export class InMemoryRateLimiter {
     };
   }
 
-  #ensureCapacity(now: number): void {
-    if (this.#entries.size < this.#maxKeys) return;
+  #ensureCapacity(now: number): boolean {
+    if (this.#entries.size < this.#maxKeys) return true;
     for (const [key, entry] of this.#entries) {
       if (entry.resetAt <= now) this.#entries.delete(key);
     }
-    if (this.#entries.size < this.#maxKeys) return;
-    const oldestKey = this.#entries.keys().next().value as string | undefined;
-    if (oldestKey !== undefined) this.#entries.delete(oldestKey);
+    return this.#entries.size < this.#maxKeys;
+  }
+
+  #nextResetAt(now: number): number {
+    let nextResetAt = now + this.#windowMs;
+    for (const entry of this.#entries.values()) {
+      if (entry.resetAt > now && entry.resetAt < nextResetAt) nextResetAt = entry.resetAt;
+    }
+    return nextResetAt;
   }
 }
 
@@ -82,16 +99,12 @@ export function registerRateLimit(
   const limiter = new InMemoryRateLimiter(options);
   const now = options.now ?? Date.now;
   const keyGenerator = options.keyGenerator ?? defaultRateLimitKey;
-  app.addHook('onRequest', async (request, reply) => {
+  const hook = options.hook ?? 'preHandler';
+  app.addHook(hook, async (request, reply) => {
     if (isHealthRoute(request.url)) return;
     const currentTime = now();
-    const networkKey = `network:${request.ip}`;
-    const networkDecision = limiter.consume(networkKey, currentTime);
     const identityKey = keyGenerator(request);
-    const identityDecision = identityKey === networkKey
-      ? networkDecision
-      : limiter.consume(identityKey, currentTime);
-    const decision = combineDecisions(networkDecision, identityDecision);
+    const decision = limiter.consume(identityKey, currentTime);
     reply.header('x-ratelimit-limit', String(decision.limit));
     reply.header('x-ratelimit-remaining', String(decision.remaining));
     reply.header('x-ratelimit-reset', String(Math.ceil(decision.resetAt / 1_000)));
@@ -100,38 +113,14 @@ export function registerRateLimit(
 }
 
 function defaultRateLimitKey(request: FastifyRequest): string {
-  const authorization = singleHeader(request, 'authorization', 20_000);
-  const bearer = authorization?.match(/^Bearer\s+([^\s]+)$/i)?.[1];
-  if (bearer) return `bearer:${digestIdentity(bearer)}`;
-
-  const tenantId = singleHeader(request, 'x-tenant-id', 200);
-  const userId = singleHeader(request, 'x-user-id', 200);
-  if (tenantId && userId) return `trusted:${digestIdentity(`${tenantId}\0${userId}`)}`;
+  // This hook runs after accessContextPlugin for product routes. The context
+  // contains either verified JWT claims or trusted development headers, so a
+  // rotating token cannot create a new bucket and a shared NAT IP is irrelevant.
+  const accessContext = request.accessContext;
+  if (accessContext) {
+    return `identity:${digestIdentity(`${accessContext.tenantId}\0${accessContext.userId}`)}`;
+  }
   return `network:${request.ip}`;
-}
-
-function combineDecisions(
-  network: RateLimitDecision,
-  identity: RateLimitDecision,
-): RateLimitDecision {
-  return {
-    allowed: network.allowed && identity.allowed,
-    limit: Math.min(network.limit, identity.limit),
-    remaining: Math.min(network.remaining, identity.remaining),
-    resetAt: Math.max(network.resetAt, identity.resetAt),
-    retryAfterSeconds: Math.max(network.retryAfterSeconds, identity.retryAfterSeconds),
-  };
-}
-
-function singleHeader(
-  request: FastifyRequest,
-  name: string,
-  maximumLength: number,
-): string | null {
-  const value = request.headers[name];
-  if (typeof value !== 'string') return null;
-  const normalized = value.trim();
-  return normalized && normalized.length <= maximumLength ? normalized : null;
 }
 
 function digestIdentity(value: string): string {

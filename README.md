@@ -229,6 +229,17 @@ scripts/verify.ps1
 - `scripts/test.ps1 → npm run test`
 - `scripts/audit.ps1 → npm run audit:dependencies -- --cache .npm-cache`
 - `scripts/smoke.ps1`：服务启动后的 trusted-header 或 Bearer 端到端冒烟；Bearer 模式先设置 `INFOMEMORY_TOKEN`。
+- `scripts/acceptance.ps1`：完整验收演示，覆盖脱敏、幂等、检索、引用降级、权限隔离、提醒状态和删除。
+
+验收演示入口链：
+
+```text
+powershell -ExecutionPolicy Bypass -File .\scripts\acceptance.ps1
+└─ scripts/acceptance.ps1
+   └─ HTTP /health、/v1/assets、/v1/search、/v1/answers、/v1/reminders
+```
+
+也可以直接运行根脚本：`npm run acceptance`。
 
 ## 生产启动
 

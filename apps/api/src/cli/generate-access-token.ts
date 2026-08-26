@@ -1,8 +1,7 @@
-import { config as loadEnvironment } from 'dotenv';
-
 import { generateAccessToken } from '../auth/access-token.js';
+import { loadProjectEnvironment } from '../config/environment.js';
 
-loadEnvironment({ path: ['.env.local', '.env'], quiet: true });
+loadProjectEnvironment();
 
 try {
   const argumentsMap = parseArguments(process.argv.slice(2));
@@ -15,7 +14,9 @@ try {
   if (roles.length === 0) throw new Error('--roles must contain at least one role');
   const expiresInSeconds = parseDuration(argumentsMap.get('expires-in') ?? '8h');
   const secret = process.env.AUTH_SECRET;
-  if (!secret) throw new Error('AUTH_SECRET must be set in the environment or .env.local');
+  if (!secret || secret.trim().length === 0) {
+    throw new Error('AUTH_SECRET must be set in the environment or .env.local');
+  }
 
   const token = generateAccessToken({
     secret,

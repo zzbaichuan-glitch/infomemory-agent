@@ -11,7 +11,7 @@
 > 需求参考：[《信息管理Agent需求说明》](https://lcnctm0uloll.feishu.cn/wiki/UPdGwdz0pivz06kT8ZHczYjbnyg?from=from_copylink)
 > 说明：原需求仅作为输入，本 PRD 对产品定位、功能边界、安全策略和版本路线进行了重新设计。
 
-> 实施状态（2026-08-19）：`codex/mvp-foundation` 已实现安全入库、基础权限边界、关键词证据搜索、可选 LLM 引用回答和飞书回调基础。向量检索、飞书 OAuth/源权限同步、云文档同步和桌面 UI 仍在后续里程碑。
+> 实施状态（2026-08-26）：`main` 已实现 v0.2 安全可用性试点，包括脱敏入库、租户/所有者权限、SQLite FTS5 检索、游标分页、Bearer 认证、引用门控回答、手动/会议提醒、飞书文本回调与命令、Docker/CI 交付链。向量检索、飞书 OAuth/源权限同步、云文档同步、durable inbox/outbox、多实例存储和桌面 UI 仍是后续里程碑。
 
 ## 1. 文档摘要
 

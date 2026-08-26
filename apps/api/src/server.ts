@@ -4,14 +4,14 @@ import { dirname, resolve, isAbsolute } from 'node:path';
 
 import { OpenAiCompatibleClient, type LlmAnswerGenerator } from '@infomemory/core';
 import { type ReminderNotifier } from '@infomemory/core';
-import { config as loadEnvironment } from 'dotenv';
 
 import { buildApp } from './app.js';
 import { loadAppConfig } from './config.js';
+import { loadProjectEnvironment } from './config/environment.js';
 import { FeishuClient, formatReminderNotification } from './feishu/feishu-client.js';
 import { createLoggerOptions } from './logging.js';
 
-loadEnvironment({ path: ['.env.local', '.env'], quiet: true });
+loadProjectEnvironment();
 const config = loadAppConfig();
 const databasePath = resolveDatabasePath(config.databasePath);
 const llmGenerator = createLlmGenerator();

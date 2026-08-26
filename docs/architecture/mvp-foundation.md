@@ -1,5 +1,10 @@
 # MVP Foundation Architecture
 
+> Implementation status: v0.2.0 is implemented in `main`. This document describes the
+> current pilot boundary, not the full PRD roadmap. SQLite remains single-instance storage;
+> production-scale OAuth, durable connector queues, ACL synchronization and vector retrieval
+> are intentionally future milestones.
+
 ## Purpose
 
 This milestone proves one security-first path through the system:
@@ -37,7 +42,7 @@ flowchart LR
 - `SecretRedactor` finds supported secret patterns and replaces them before repository calls.
 - `AssetService` validates ingestion, hashes safe content, and creates stable ingestion commands.
 - `AssetRepository` requires `AccessContext` on every public read method.
-- `SqliteAssetRepository` implements idempotency, safe-content deduplication, multiple source locations, tenant filtering and owner filtering.
+- `SqliteAssetRepository` implements versioned migrations, SQLite FTS5, idempotency, safe-content deduplication, multiple source locations, tenant filtering, owner filtering, cursor pagination, owner deletion and reminder delivery leases.
 - `SearchService` performs deterministic keyword ranking and produces stable evidence IDs.
 - `AnswerService` accepts generated prose only if at least one valid retrieved citation is present.
 - `OpenAiCompatibleClient` appends `/chat/completions`, times out requests, and sanitizes provider errors.
@@ -46,7 +51,7 @@ flowchart LR
 
 - Access-context hook protects product routes.
 - Asset, search and answer routes expose the core services.
-- Feishu event service verifies callback tokens with constant-time digest comparison, handles URL verification, normalizes supported text events and relies on asset idempotency for duplicate delivery.
+- Feishu event service verifies callback tokens and Encrypt Key signatures with constant-time digest comparison, handles URL verification, normalizes supported text events, supports help/search/ask commands and relies on connector receipts plus asset idempotency for duplicate delivery.
 - The global error handler returns stable safe shapes and does not echo request bodies or provider bodies.
 - `server.ts` is the only composition root that loads environment variables and starts the network listener.
 
@@ -70,13 +75,13 @@ SQLite is used only for the pilot slice. Tables are:
 - `asset_sources`: one or more source locations per asset.
 - `asset_ingestions`: tenant-scoped idempotency key to asset mapping.
 
-The repository boundary permits a later PostgreSQL implementation. The current hash deduplication key contains tenant, owner, visibility and redacted-content hash. Two documents differing only in a detected secret intentionally collapse to the same safe asset in this milestone because secret values are discarded.
+The repository boundary permits a later PostgreSQL implementation. The current hash deduplication key contains tenant, owner, visibility and redacted-content hash. Two documents differing only in a detected secret intentionally collapse to the same safe asset; the idempotency request fingerprint still distinguishes different raw requests so a reused key cannot silently change meaning.
 
 ## Search truthfulness
 
-The current search mode is `keyword`, not vector or hybrid search. Chinese queries are expanded into deterministic bigrams for basic recall. This is sufficient to test API, permission and citation behavior but not sufficient for production relevance targets in the PRD.
+The current search mode is SQLite FTS5 keyword search, not vector or hybrid search. Chinese queries are expanded into deterministic bigrams with a constrained fallback for short queries. This is sufficient to test API, permission and citation behavior but not sufficient for production relevance targets in the PRD.
 
-Vector retrieval, reranking, entity expansion and source ACL synchronization remain future milestones. The `/health` endpoint exposes `searchMode=keyword` so clients cannot silently mislabel the implementation.
+Vector retrieval, reranking, entity expansion and source ACL synchronization remain future milestones. The `/health` endpoint exposes `searchMode=sqlite_fts5` so clients cannot silently mislabel the implementation.
 
 ## LLM gateway
 
@@ -99,19 +104,19 @@ No live request was made with the key shared in chat because that key should be 
 Implemented:
 
 - URL verification challenge.
-- Verification Token check.
+- Verification Token and optional Encrypt Key/signature checks.
 - `im.message.receive_v1` text normalization.
 - Tenant/user derivation from verified event metadata.
 - Owner-only default visibility.
-- Event delivery idempotency.
+- Event delivery idempotency and outbound text notifications.
 
 Not implemented:
 
-- Encrypt Key payload decryption.
 - Feishu OAuth and tenant authorization.
 - Cloud document/wiki/file synchronization.
 - Source ACL synchronization and revocation propagation.
-- Outbound bot messages or cards.
+- Durable inbox/outbox processing for webhook commands and notifications.
+- Interactive cards and media/file parsing.
 - Media/file parsing.
 
 These missing controls block public production deployment but do not block local behavior testing.

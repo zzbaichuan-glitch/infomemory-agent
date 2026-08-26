@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 
 import type {
   AccessContext,
@@ -36,10 +37,17 @@ import type {
 import {
   createFtsIndexText,
   createFtsMatchExpression,
+  isSingleHanTerm,
+  searchTerms,
 } from '../search/search-text.js';
+import {
+  sanitizeContent,
+  sanitizeSourceReference,
+  sanitizeTitle,
+} from '../security/metadata-sanitizer.js';
 
 type Row = Record<string, unknown>;
-const CURRENT_SCHEMA_VERSION = 4;
+const CURRENT_SCHEMA_VERSION = 5;
 
 export class SqliteAssetRepository implements
   AssetRepository,
@@ -78,21 +86,13 @@ export class SqliteAssetRepository implements
           || idempotent.request_fingerprint === undefined
           ? null
           : String(idempotent.request_fingerprint);
-        if (storedFingerprint && storedFingerprint !== input.requestFingerprint) {
+        // Legacy rows have no trustworthy request digest. Fail closed instead
+        // of binding an arbitrary new payload to an old idempotency key.
+        if (!storedFingerprint || !storedFingerprint.startsWith('v2:')) {
           throw new IdempotencyConflictError();
         }
-        if (!storedFingerprint) {
-          this.#database.prepare(`
-            UPDATE asset_ingestions
-            SET request_fingerprint = ?
-            WHERE tenant_id = ? AND actor_id = ? AND operation = ? AND idempotency_key = ?
-          `).run(
-            input.requestFingerprint,
-            input.context.tenantId,
-            input.context.userId,
-            input.operation,
-            input.idempotencyKey,
-          );
+        if (storedFingerprint !== input.requestFingerprint) {
+          throw new IdempotencyConflictError();
         }
         const asset = this.#loadAccessibleAssetById(input.context, assetId);
         if (!asset) throw new Error('Idempotent asset is not accessible');
@@ -234,21 +234,53 @@ export class SqliteAssetRepository implements
   ): Promise<AssetSearchHit[]> {
     const matchExpression = createFtsMatchExpression(query);
     if (!matchExpression) return [];
+    const terms = searchTerms(query);
     const limit = Math.max(1, Math.min(options.limit ?? 20, 100));
+    // SQLite's bm25() uses statistics from every row in the FTS index. Even
+    // when the final WHERE clause is tenant-scoped, an unauthorized document
+    // can therefore influence an authorized result's score and ordering. Use
+    // a document-local token overlap score instead; it is computed only from
+    // rows that pass the access predicate and never exposes global FTS stats.
+    const singleCharacterTerms = terms.filter(isSingleHanTerm);
+    const scoreTerms = terms.flatMap((term) => isSingleHanTerm(term)
+      ? [
+        `(CASE WHEN instr(a.title, ?) > 0 THEN 8 ELSE 0 END)`,
+        `(CASE WHEN instr(a.redacted_content, ?) > 0 THEN 1 ELSE 0 END)`,
+      ]
+      : [
+        `(CASE WHEN instr(' ' || coalesce(f.title_terms, '') || ' ', ' ' || ? || ' ') > 0 THEN 8 ELSE 0 END)`,
+        `(CASE WHEN instr(' ' || coalesce(f.content_terms, '') || ' ', ' ' || ? || ' ') > 0 THEN 1 ELSE 0 END)`,
+      ]);
+    const scoreExpression = scoreTerms.join(' + ');
+    const scoreValues = terms.flatMap((term) => [term, term]);
+    const fallbackClause = singleCharacterTerms.length > 0
+      ? singleCharacterTerms
+        .map(() => '(instr(a.title, ?) > 0 OR instr(a.redacted_content, ?) > 0)')
+        .join(' OR ')
+      : '0';
+    const fallbackValues = singleCharacterTerms.flatMap((term) => [term, term]);
     const rows = this.#database.prepare(`
-      SELECT a.*, bm25(assets_fts, 0.0, 8.0, 1.0) AS search_rank
-      FROM assets_fts
-      JOIN assets a ON a.id = assets_fts.asset_id
-      WHERE assets_fts MATCH ?
-        AND a.tenant_id = ?
+      SELECT a.*, (${scoreExpression}) AS search_score
+      FROM assets a
+      LEFT JOIN assets_fts f ON a.id = f.asset_id
+      WHERE a.tenant_id = ?
         AND (a.visibility = 'tenant' OR a.owner_id = ?)
-      ORDER BY search_rank ASC, a.created_at DESC, a.id ASC
+        AND (a.id IN (SELECT asset_id FROM assets_fts WHERE assets_fts MATCH ?)
+          OR ${fallbackClause})
+      ORDER BY search_score DESC, a.created_at DESC, a.id ASC
       LIMIT ?
-    `).all(matchExpression, context.tenantId, context.userId, limit) as Row[];
+    `).all(
+      ...scoreValues,
+      context.tenantId,
+      context.userId,
+      matchExpression,
+      ...fallbackValues,
+      limit,
+    ) as Row[];
 
     return rows.map((row) => ({
       asset: this.#mapAsset(row),
-      score: Math.max(Number.EPSILON, -Number(row.search_rank)),
+      score: Math.max(1, Number(row.search_score)),
     }));
   }
 
@@ -375,11 +407,20 @@ export class SqliteAssetRepository implements
     context: AccessContext,
     id: string,
     status: ReminderStatus,
+    expectedStatus?: ReminderStatus,
   ): Promise<Reminder | null> {
+    const expectedClause = expectedStatus ? ' AND status = ?' : '';
     const result = this.#database.prepare(`
       UPDATE reminders SET status = ?
       WHERE id = ? AND tenant_id = ? AND user_id = ?
-    `).run(status, id, context.tenantId, context.userId);
+      ${expectedClause}
+    `).run(
+      ...(
+        expectedStatus
+          ? [status, id, context.tenantId, context.userId, expectedStatus]
+          : [status, id, context.tenantId, context.userId]
+      ),
+    );
     if (Number(result.changes) === 0) return null;
     return this.findReminder(context, id);
   }
@@ -484,6 +525,11 @@ export class SqliteAssetRepository implements
       if (version < 4) {
         this.#migrateConnectorEventReceipts();
         this.#database.exec('PRAGMA user_version = 4;');
+        version = 4;
+      }
+      if (version < 5) {
+        this.#migrateSensitiveMetadata();
+        this.#database.exec('PRAGMA user_version = 5;');
       }
       this.#database.exec('COMMIT;');
     } catch (error) {
@@ -587,6 +633,8 @@ export class SqliteAssetRepository implements
   }
 
   #migrateFtsIndex(): void {
+    // Sanitize first so no legacy title/content can enter the new index.
+    this.#migrateSensitiveMetadata(false);
     this.#database.exec(`
       CREATE VIRTUAL TABLE assets_fts USING fts5(
         asset_id UNINDEXED,
@@ -613,6 +661,107 @@ export class SqliteAssetRepository implements
         String(asset.redacted_content),
       );
     }
+  }
+
+  #migrateSensitiveMetadata(rebuildFts = true): void {
+    const assets = this.#database.prepare(`
+      SELECT id, title, redacted_content, content_hash, secret_finding_count
+      FROM assets
+      ORDER BY id ASC
+    `).all() as Row[];
+    for (const asset of assets) {
+      const title = sanitizeTitle(String(asset.title));
+      const content = sanitizeContent(String(asset.redacted_content));
+      const additionalFindings = title.findingCount + content.findingCount;
+      // Recompute from the sanitized value. A legacy 64-character hash may
+      // have been derived from raw content and must not prevent safe dedup.
+      const contentHash = createHash('sha256')
+        .update(content.value, 'utf8')
+        .digest('hex');
+      this.#database.prepare(`
+        UPDATE assets
+        SET title = ?, redacted_content = ?,
+            content_hash = ?, secret_finding_count = secret_finding_count + ?
+        WHERE id = ?
+      `).run(
+        title.value,
+        content.value,
+        contentHash,
+        additionalFindings,
+        String(asset.id),
+      );
+    }
+
+    const sources = this.#database.prepare(`
+      SELECT asset_id, source_identity, source_type, external_id, source_url
+      FROM asset_sources
+      ORDER BY asset_id ASC, source_identity ASC
+    `).all() as Row[];
+    for (const source of sources) {
+      const sanitized = sanitizeSourceReference({
+        type: this.#sourceType(String(source.source_type)),
+        ...(source.external_id !== null && source.external_id !== undefined
+          ? { externalId: String(source.external_id) }
+          : {}),
+        ...(source.source_url !== null && source.source_url !== undefined
+          ? { url: String(source.source_url) }
+          : {}),
+      });
+      const externalId = sanitized.source.externalId ?? null;
+      const sourceUrl = sanitized.source.url ?? null;
+      // source_identity is internal but still lives in the database. Replace
+      // the legacy raw value with a deterministic digest so secrets cannot
+      // survive in an otherwise hidden uniqueness key.
+      const currentSourceIdentity = String(source.source_identity);
+      const sourceIdentity = currentSourceIdentity.startsWith('legacy:')
+        ? currentSourceIdentity
+        : `legacy:${createHash('sha256')
+          .update(currentSourceIdentity, 'utf8')
+          .digest('hex')}`;
+      this.#database.prepare(`
+        UPDATE asset_sources
+        SET source_identity = ?, external_id = ?, source_url = ?
+        WHERE asset_id = ? AND source_identity = ?
+      `).run(
+        sourceIdentity,
+        externalId,
+        sourceUrl,
+        String(source.asset_id),
+        String(source.source_identity),
+      );
+    }
+
+    const reminders = this.#database.prepare(`
+      SELECT id, title FROM reminders ORDER BY id ASC
+    `).all() as Row[];
+    for (const reminder of reminders) {
+      const title = sanitizeTitle(String(reminder.title));
+      this.#database.prepare(`
+        UPDATE reminders SET title = ? WHERE id = ?
+      `).run(title.value, String(reminder.id));
+    }
+
+    if (rebuildFts && this.#tableExists('assets_fts')) {
+      this.#database.exec('DELETE FROM assets_fts;');
+      const currentAssets = this.#database.prepare(`
+        SELECT id, title, redacted_content FROM assets ORDER BY id ASC
+      `).all() as Row[];
+      for (const asset of currentAssets) {
+        this.#insertFtsAsset(
+          String(asset.id),
+          String(asset.title),
+          String(asset.redacted_content),
+        );
+      }
+    }
+  }
+
+  #tableExists(name: string): boolean {
+    const row = this.#database.prepare(`
+      SELECT 1 AS present FROM sqlite_master
+      WHERE type IN ('table', 'virtual table') AND name = ? LIMIT 1
+    `).get(name) as Row | undefined;
+    return Boolean(row);
   }
 
   #migrateConnectorEventReceipts(): void {
