@@ -27,9 +27,9 @@
     "audit:dependencies": "npm audit --audit-level=high --registry=https://registry.npmjs.org"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0",
+    "@types/node": "^26.4.0",
     "tsx": "^4.20.0",
-    "typescript": "^5.9.0",
-    "vitest": "^3.2.0"
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
   }
 }
