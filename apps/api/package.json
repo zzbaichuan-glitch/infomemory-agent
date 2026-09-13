@@ -18,7 +18,7 @@
   "dependencies": {
     "@infomemory/core": "*",
     "dotenv": "^17.2.0",
-    "fastify": "^5.6.0",
-    "zod": "^4.1.0"
+    "fastify": "^5.12.3",
+    "zod": "^4.6.1"
   }
 }
